@@ -11,13 +11,13 @@ class LLM:
     def __init__(self):
         self.api_base_url = os.getenv("API_BASE_URL", "http://localhost:8080/v1")
         self.model = os.getenv("MODEL", "qwen3.5:9B")
-        self.client = openai.OpenAI(base_url=self.api_base_url)
+        self.client = openai.AsyncOpenAI(base_url=self.api_base_url)
         self.memory = Memory()
 
     def set_system_prompt(self, prompt: str):
         self.memory.add({"role": "system", "content": prompt})
 
-    def generate(self, prompt: str, tools: List[Tool] = None, skills: List[Skill] = None, max_rounds: int = 10) -> str:
+    async def generate(self, prompt: str, tools: List[Tool] = None, skills: List[Skill] = None, max_rounds: int = 10):
         self.memory.add({"role": "user", "content": prompt})
 
         skills_schemas = [s.to_openai_schema() for s in skills] if skills else None
@@ -27,47 +27,75 @@ class LLM:
         all_callables = (tools or []) + (skills or [])
 
         for _ in range(max_rounds):
-            kwargs = {"model": self.model, "messages": self.memory.get()}
+            kwargs = {"model": self.model, "messages": self.memory.get(), "stream": True}
             if all_schemas:
                 kwargs["tools"] = all_schemas
-            response = self.client.chat.completions.create(**kwargs)
-            message = response.choices[0].message
+            stream = await self.client.chat.completions.create(**kwargs)
 
-            if not message.tool_calls:
-                self.memory.add({"role": "assistant", "content": message.content})
-                return message.content
+            content = ""
+            tool_calls_accum = {}
+
+            async for chunk in stream:
+                delta = chunk.choices[0].delta
+
+                if delta.content:
+                    content += delta.content
+                    yield delta.content
+
+                if delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        idx = tc_delta.index
+                        if idx not in tool_calls_accum:
+                            tool_calls_accum[idx] = {
+                                "id": tc_delta.id or "",
+                                "name": "",
+                                "arguments": "",
+                            }
+                        if tc_delta.id:
+                            tool_calls_accum[idx]["id"] = tc_delta.id
+                        if tc_delta.function:
+                            if tc_delta.function.name:
+                                tool_calls_accum[idx]["name"] += tc_delta.function.name
+                            if tc_delta.function.arguments:
+                                tool_calls_accum[idx]["arguments"] += tc_delta.function.arguments
+
+            if not tool_calls_accum:
+                self.memory.add({"role": "assistant", "content": content})
+                await self.memory.summarize_turn(self.client, self.model)
+                return
 
             self.memory.add({
                 "role": "assistant",
-                "content": message.content,
+                "content": content,
                 "tool_calls": [
                     {
-                        "id": tc.id,
+                        "id": tc["id"],
                         "type": "function",
                         "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
+                            "name": tc["name"],
+                            "arguments": tc["arguments"],
                         },
                     }
-                    for tc in message.tool_calls
+                    for tc in tool_calls_accum.values()
                 ],
             })
 
-            for tool_call in message.tool_calls:
-                result = self._execute_tool_call(tool_call, all_callables)
+            for tc in tool_calls_accum.values():
+                result = self._execute_tool_call_from_dict(tc, all_callables)
                 self.memory.add({
                     "role": "tool",
-                    "tool_call_id": tool_call.id,
+                    "tool_call_id": tc["id"],
                     "content": str(result),
                 })
 
-        self.memory.add({"role": "assistant", "content": message.content})
-        return message.content
+        self.memory.add({"role": "assistant", "content": content})
+        await self.memory.summarize_turn(self.client, self.model)
 
-    def _execute_tool_call(self, tool_call, tools: list) -> str:
-        func_name = tool_call.function.name
-        arguments = json.loads(tool_call.function.arguments)
+    def _execute_tool_call_from_dict(self, tool_call: dict, tools: list) -> str:
+        func_name = tool_call["name"]
+        arguments = json.loads(tool_call["arguments"])
         for tool in tools:
             if tool.name == func_name:
                 return tool.execute(**arguments)
         return f"Error: Tool '{func_name}' not found."
+

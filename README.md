@@ -1,36 +1,36 @@
 # AndrewCLI
 
-A lightweight CLI agent in Python, designed to be as easy as possible — no bloated abstractions or unnecessary features that skyrocket your token usage.
+A lightweight, fully async CLI agent in Python — no bloated abstractions or unnecessary features that skyrocket your token usage.
 
 ## Project Structure
 
 ```
 AndrewCLI/
-├── app.py                  # Entry point — loads config, domain, and runs the REPL
+├── app.py                  # Entry point — async REPL with spinner and streaming
 ├── config.yaml             # Configuration file (set active domain here)
 ├── requirements.txt        # Python dependencies
 └── src/
     ├── __init__.py
     ├── core/               # Framework internals
-    │   ├── domain.py       # Base Domain class
-    │   ├── llm.py          # LLM client with tool-calling loop
-    │   ├── memory.py       # Conversation memory (message history)
+    │   ├── domain.py       # Base Domain class (async generator)
+    │   ├── llm.py          # Async LLM client with streaming + tool-calling loop
+    │   ├── memory.py       # Rolling memory with background summarization
     │   ├── skill.py        # Base Skill class (markdown-defined tools)
     │   └── tool.py         # Base Tool class (code-defined tools)
     ├── domains/            # Domain definitions
     │   ├── general.py      # General-purpose domain (WriteFile, ReadFile, etc.)
     │   └── coding.py       # Coding-focused domain (WIP)
     └── skills/             # Skill instruction files
-        └── habit.md        # Example skill definition
+        └── example.md      # Example skill definition
 ```
 
 ## Architecture
 
-AndrewCLI is built around three core concepts:
+AndrewCLI is built around four core concepts:
 
 ### Domains
 
-A **Domain** groups a system prompt, a set of tools, and a set of skills into a single persona. Domains are defined as Python classes in `src/domains/` and loaded dynamically based on `config.yaml`.
+A **Domain** groups a system prompt, a set of tools, and a set of skills into a single persona. Domains are defined as Python classes in `src/domains/` and loaded dynamically based on `config.yaml`. The `generate()` method is an async generator that yields tokens as they stream in.
 
 ### Tools
 
@@ -50,6 +50,26 @@ description: Execute an example skill
 1. Do something using the available tools
 2. Acknowledge the user
 ```
+
+### Memory
+
+A **rolling memory** system that maintains context across turns without growing the message history indefinitely.
+
+- After each turn, the last 1500 characters of conversation are extracted and merged with an existing summary using an LLM summarization call.
+- The merged summary (~500 words max) is persisted to `~/.andrewcli/data/memory.json`.
+- Older messages are trimmed — only the current turn is kept in the message array.
+- The summary is injected into the system prompt inside `<memory>` tags so the model always has context.
+- The merge LLM call runs as a **fire-and-forget background task** (`asyncio.create_task`), so the user gets the next prompt immediately. Sequential merges are serialized to prevent overwrites.
+
+## Async Pipeline
+
+The entire I/O pipeline is non-blocking:
+
+1. **`app.py`** — runs under `asyncio.run()`. User input is read via `run_in_executor` so the event loop stays free.
+2. **Spinner** — an `asyncio.Task` that animates until the first token arrives, then gets cancelled.
+3. **Streaming** — `LLM.generate()` is an async generator using `AsyncOpenAI`. Tokens are yielded as they arrive from the API.
+4. **Tool calls** — accumulated from streamed chunks, executed, and looped back to the API automatically.
+5. **Memory summarization** — fires in the background after the response completes; no user-facing delay.
 
 ## Setup
 
@@ -84,10 +104,11 @@ description: Execute an example skill
 $ python app.py
 Andrew is running... (Domain: general)
 Ask: Write "hello" to greeting.txt
+⠋ Thinking...
 Andrew: File greeting.txt written successfully. ...
 ```
 
-The agent can chain tool calls automatically — for example, a skill might instruct the LLM to read a file, transform its contents, and write the result back.
+The agent can chain tool calls automatically — for example, a skill might instruct the LLM to read a file, transform its contents, and write the result back. A spinner animates while the model is processing, then tokens stream in with a typewriter effect.
 
 ## Extending
 

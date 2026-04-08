@@ -2,7 +2,6 @@ from src.core.domain import Domain
 from src.core.tool import Tool
 from src.core.skill import Skill
 
-
 class WriteFile(Tool):
     name: str = "write_file"
     description: str = "Write content to a file."
@@ -41,7 +40,7 @@ class GeneralDomain(Domain):
     tools: list = [
         WriteFile(),
         ReadFile(),
-        ExecuteCommand(),
+        ExecuteCommand()
     ]
     skills: list = [
         Example()

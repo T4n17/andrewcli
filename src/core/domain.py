@@ -12,6 +12,8 @@ class Domain(ABC):
         self.tools = self.tools
         self.skills = self.skills
         self.llm = LLM()
+        self.llm.set_system_prompt(self.system_prompt)
 
-    def generate(self, prompt: str) -> str:
-        return self.llm.generate(prompt, self.tools, self.skills)
+    async def generate(self, prompt: str):
+        async for token in self.llm.generate(prompt, self.tools, self.skills):
+            yield token

@@ -11,5 +11,5 @@ class GeneralDomain(Domain):
         GetCurrentDate()
     ]
     skills: list = [
-        Example(),
+        Example()
     ]

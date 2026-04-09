@@ -1,0 +1,87 @@
+QWidget#ChatPanel {
+    background-color: #1e1e2e;
+    border: 2px solid #89b4fa;
+    border-radius: 10px;
+}
+
+QLabel#PanelLabel {
+    color: #6c7086;
+    font-size: 12px;
+    padding: 0 4px;
+}
+
+QLineEdit#InputEntry {
+    background-color: #181825;
+    color: #cdd6f4;
+    border: 1px solid #585b70;
+    border-radius: 6px;
+    font-size: 16px;
+    padding: 10px 14px;
+    selection-background-color: #585b70;
+}
+
+QLineEdit#InputEntry:focus {
+    border: 1px solid #89b4fa;
+}
+
+QTextBrowser {
+    background-color: #1e1e2e;
+    color: #cdd6f4;
+    border: none;
+    padding: 12px;
+    font-size: 18px;
+}
+
+QScrollBar:vertical {
+    background: #1e1e2e;
+    width: 8px;
+    margin: 0;
+    border: none;
+    border-radius: 4px;
+}
+
+QScrollBar::handle:vertical {
+    background: #585b70;
+    min-height: 30px;
+    border-radius: 4px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #89b4fa;
+}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical,
+QScrollBar::add-page:vertical,
+QScrollBar::sub-page:vertical {
+    background: none;
+    height: 0;
+    border: none;
+}
+
+QPushButton#CloseBtn {
+    color: #6c7086;
+    background: transparent;
+    border: none;
+    font-size: 18px;
+    font-weight: bold;
+    padding: 0 4px;
+}
+
+QPushButton#CloseBtn:hover {
+    color: #cdd6f4;
+}
+
+QPushButton#StopBtn {
+    color: #f38ba8;
+    background: transparent;
+    border: 1px solid #f38ba8;
+    border-radius: 4px;
+    font-size: 12px;
+    padding: 2px 8px;
+}
+
+QPushButton#StopBtn:hover {
+    background: #f38ba8;
+    color: #1e1e2e;
+}

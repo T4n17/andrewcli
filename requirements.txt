@@ -1,3 +1,5 @@
 openai
 pyyaml
-json
+fastapi
+uvicorn
+PyQt6

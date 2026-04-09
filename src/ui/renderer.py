@@ -14,17 +14,37 @@ class StreamRenderer:
     def __init__(self):
         self.spinner = Spinner()
 
+    def _check_esc(self, fd):
+        if select.select([sys.stdin], [], [], 0)[0]:
+            ch = os.read(fd, 1)
+            if ch == b'\x1b':
+                return True
+        return False
+
     async def render(self, token_stream):
         self.spinner.status = "Thinking..."
         self.spinner.start()
         cancelled = False
         fd = sys.stdin.fileno()
-        old_settings = None
+        old_settings = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
         think_filter = ThinkFilter()
 
         try:
             first = True
             async for token in token_stream:
+                if cancelled:
+                    continue
+
+                if self._check_esc(fd):
+                    cancelled = True
+                    if self.spinner.is_running:
+                        self.spinner.stop()
+                        sys.stdout.write("\r\033[K")
+                    sys.stdout.write("\033[0m [stopped]")
+                    sys.stdout.flush()
+                    continue
+
                 if isinstance(token, ToolEvent):
                     sys.stdout.write("\r\033[K")
                     if token.tool_name:
@@ -48,20 +68,7 @@ class StreamRenderer:
                     if first:
                         sys.stdout.write("Andrew: ")
                         first = False
-                        old_settings = termios.tcgetattr(fd)
-                        tty.setcbreak(fd)
                     sys.stdout.flush()
-
-                if cancelled:
-                    continue
-
-                if select.select([sys.stdin], [], [], 0)[0]:
-                    ch = os.read(fd, 1)
-                    if ch == b'\x1b':
-                        cancelled = True
-                        sys.stdout.write("\033[0m [stopped]")
-                        sys.stdout.flush()
-                        continue
 
                 segments = think_filter.process(token)
                 for text, is_thinking in segments:
@@ -80,6 +87,5 @@ class StreamRenderer:
                 sys.stdout.write("\r\033[K")
             print()
         finally:
-            if old_settings is not None:
-                termios.tcflush(fd, termios.TCIFLUSH)
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            termios.tcflush(fd, termios.TCIFLUSH)
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)

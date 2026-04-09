@@ -47,7 +47,7 @@ class AndrewCLI:
         except ValueError:
             next_name = domains[0]
         try:
-            self.domain = self._load_domain(next_name)
+            self.domain = self.load_domain(next_name)
         except ValueError:
             pass
 

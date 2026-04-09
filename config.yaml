@@ -1,2 +1,9 @@
 domain: "general"
 execute_bash_automatically: true
+tray_width_compact: 500
+tray_height_compact: 80
+tray_width_expanded: 500 #900
+tray_height_expanded: 1000 #600
+tray_platform: "xcb"
+tray_position: "bottom-right"
+tray_opacity: "90%"

@@ -7,7 +7,7 @@ A lightweight, fully async CLI agent in Python — no bloated abstractions or un
 ```
 AndrewCLI/
 ├── app.py                          # Entry point — async REPL, domain switching, input history
-├── config.yaml                     # Configuration file (domain, execute_bash_automatically)
+├── config.yaml                     # Configuration file (domain, tray settings, etc.)
 ├── requirements.txt                # Python dependencies
 └── src/
     ├── __init__.py
@@ -19,10 +19,20 @@ AndrewCLI/
     │   ├── memory.py               # Rolling memory with background summarization
     │   ├── skill.py                # Base Skill class (markdown-defined tools)
     │   └── tool.py                 # Base Tool class with run() error wrapper
-    ├── ui/                         # UI rendering layer
+    ├── ui/                         # CLI rendering layer
     │   ├── animations.py           # Spinner class (async, dynamic status)
     │   ├── filter.py               # ThinkFilter — parses <think> tags for reasoning display
     │   └── renderer.py             # StreamRenderer — orchestrates spinner, filtering, streaming
+    ├── tray/                       # System tray GUI application
+    │   ├── __init__.py
+    │   ├── __main__.py             # Entry point for `python -m src.tray`
+    │   ├── bootstrap.py            # Pre-Qt init (sets QT_QPA_PLATFORM from config)
+    │   ├── app.py                  # Main tray app — domain loading, worker lifecycle, signals
+    │   ├── worker.py               # StreamWorker QThread — runs domain.generate() on shared async loop
+    │   ├── panel.py                # ChatPanel widget — input, streaming output, spinner, controls
+    │   ├── icon.py                 # Tray icon and context menu creation
+    │   ├── style.css               # Qt stylesheet (Catppuccin Mocha theme)
+    │   └── md.css                  # CSS for markdown rendering in QTextBrowser
     ├── tools/                      # Reusable tool definitions
     │   └── common.py               # WriteFile, ReadFile, ExecuteCommand, GetCurrentDate
     ├── skills/
@@ -40,7 +50,7 @@ AndrewCLI is built around six core concepts:
 
 ### Config
 
-A centralized **Config** class (`src/shared/config.py`) loads `config.yaml` and exposes settings as attributes. Used by `app.py` to select the active domain and by tools like `ExecuteCommand` to read `execute_bash_automatically`.
+A centralized **Config** class (`src/shared/config.py`) loads `config.yaml` and exposes settings as attributes. Used by `app.py` to select the active domain, by tools like `ExecuteCommand` to read `execute_bash_automatically`, and by the tray app for window dimensions, position, opacity, and platform backend.
 
 ### Domains
 
@@ -78,6 +88,23 @@ A **rolling memory** system that maintains context across turns without growing 
 - Older messages are trimmed — only the current turn is kept in the message array.
 - The summary is injected into the system prompt inside `<memory>` tags so the model always has context.
 - The merge LLM call runs as a **fire-and-forget background task** (`asyncio.create_task`), so the user gets the next prompt immediately. Sequential merges are serialized to prevent overwrites.
+
+### Tray App (`src/tray/`)
+
+A **PyQt6 system tray application** that provides a GUI interface to AndrewCLI. It uses the same domain classes and async logic as the CLI
+
+- **`bootstrap.py`** — reads `tray_platform` from `config.yaml` and sets `QT_QPA_PLATFORM` before Qt is imported (required for Wayland compatibility).
+- **`app.py`** — orchestrator. Loads the domain on a persistent asyncio event loop (shared daemon thread), manages `StreamWorker` lifecycle with cancellation support, and wires signals between the worker and the chat panel.
+- **`worker.py`** — `StreamWorker` is a `QThread` that runs `domain.generate()` on the shared asyncio loop via `asyncio.run_coroutine_threadsafe`. Emits `token_received`, `tool_status`, `finished`, and `error` signals. Supports cancellation: calling `cancel()` cancels the asyncio future and sets a flag checked during streaming.
+- **`panel.py`** — `ChatPanel` widget with a `QLineEdit` input, a `QTextBrowser` for streamed markdown output, and header controls (stop, expand/collapse, close). Includes a braille spinner animation (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) driven by a `QTimer` that shows status during generation and tool execution. Supports compact (input-only) and expanded (input + response) modes with configurable position and opacity.
+- **`icon.py`** — creates the system tray icon and context menu.
+- **`style.css`** / **`md.css`** — Catppuccin Mocha themed stylesheets for Qt widgets and markdown rendering.
+
+Key behaviors:
+- Submitting a new message while generating **cancels the previous generation** and waits for it to finish before starting a new one.
+- **Multi-turn conversations** work because the domain instance (and its memory) persists across all turns.
+- The spinner updates dynamically with tool names (e.g., `⠧ Running execute_command: query text...`).
+- Window position, size, opacity, and platform backend are all configurable via `config.yaml`.
 
 ### UI Layer (`src/ui/`)
 
@@ -126,17 +153,35 @@ The entire I/O pipeline is non-blocking:
    ```yaml
    domain: "general"
    execute_bash_automatically: true
+   tray_width_compact: 500
+   tray_height_compact: 80
+   tray_width_expanded: 500
+   tray_height_expanded: 1000
+   tray_platform: "xcb"
+   tray_position: "bottom-right"
+   tray_opacity: "90%"
    ```
 
-   | Key                          | Default     | Description                                      |
-   |------------------------------|-------------|--------------------------------------------------|
-   | `domain`                     | `"general"` | Active domain (matches filename in `src/domains/`)|
-   | `execute_bash_automatically` | `false`     | Skip confirmation prompt for shell commands       |
+   | Key                          | Default        | Description                                       |
+   |------------------------------|----------------|---------------------------------------------------|
+   | `domain`                     | `"general"`    | Active domain (matches filename in `src/domains/`) |
+   | `execute_bash_automatically` | `false`        | Skip confirmation prompt for shell commands        |
+   | `tray_width_compact`         | `600`          | Compact panel width (px)                           |
+   | `tray_height_compact`        | `80`           | Compact panel height (px)                          |
+   | `tray_width_expanded`        | `900`          | Expanded panel width (px)                          |
+   | `tray_height_expanded`       | `600`          | Expanded panel height (px)                         |
+   | `tray_platform`              | `""`           | Qt platform backend (`"xcb"` for X11, `""` for default) |
+   | `tray_position`              | `"top-right"`  | Window position: `top-left`, `top-center`, `top-right`, `center-left`, `center`, `center-right`, `bottom-left`, `bottom-center`, `bottom-right` |
+   | `tray_opacity`               | `"100%"`       | Window opacity (`"0%"` to `"100%"`)                |
 
 4. **Run:**
 
    ```bash
+   # CLI mode
    python app.py
+
+   # Tray mode (system tray GUI)
+   python -m src.tray
    ```
 
 ## Usage
@@ -217,5 +262,5 @@ Then set `domain: "research"` in `config.yaml`. The domain is loaded dynamically
 ## TODO
 
 - [ ] Write a skill that allows AndrewCLI to update itself with new tools, skills, or domains
-- [ ] Implement GUI mode (`--gui` flag)
+- [x] Implement system tray GUI mode (`python -m src.tray`)
 

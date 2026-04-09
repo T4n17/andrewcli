@@ -112,14 +112,14 @@ class ChatPanel(QWidget):
 
     def _set_compact(self):
         self._expanded = False
-        self._streaming = False
-        self._stop_spinner()
         self._browser.hide()
         self._toggle_btn.setText("\u25B3")
         self._toggle_btn.show()
         self._close_btn.show()
         self._stop_btn.hide()
-        self._label.setText("Ask Andrew")
+        if not self._streaming:
+            self._stop_spinner()
+            self._label.setText("Ask Andrew")
         self.setFixedSize(
             self._config.tray_width_compact,
             self._config.tray_height_compact,

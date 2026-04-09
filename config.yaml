@@ -1,1 +1,2 @@
 domain: "general"
+execute_bash_automatically: true

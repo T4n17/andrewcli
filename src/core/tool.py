@@ -19,6 +19,12 @@ class Tool(ABC):
     def execute(self, *args, **kwargs):
         pass
 
+    def run(self, **kwargs) -> str:
+        try:
+            return self.execute(**kwargs)
+        except Exception as e:
+            return f"[Tool Error] {type(e).__name__}: {e}"
+
     def to_openai_schema(self) -> dict:
         sig = inspect.signature(self.execute)
         properties = {}

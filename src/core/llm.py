@@ -1,10 +1,17 @@
 import json
 import openai
 import os
+import asyncio
 from typing import List
 from src.core.memory import Memory
 from src.core.tool import Tool
 from src.core.skill import Skill
+
+
+class ToolEvent:
+    def __init__(self, tool_name=None, tool_args=None):
+        self.tool_name = tool_name
+        self.tool_args = tool_args
 
 
 class LLM:
@@ -81,6 +88,12 @@ class LLM:
             })
 
             for tc in tool_calls_accum.values():
+                try:
+                    args = json.loads(tc["arguments"]) if tc.get("arguments") else {}
+                except json.JSONDecodeError:
+                    args = {}
+                yield ToolEvent(tc["name"], args)
+                await asyncio.sleep(2)
                 result = self._execute_tool_call_from_dict(tc, all_callables)
                 self.memory.add({
                     "role": "tool",
@@ -88,14 +101,19 @@ class LLM:
                     "content": str(result),
                 })
 
+            yield ToolEvent()
+
         self.memory.add({"role": "assistant", "content": content})
         await self.memory.summarize_turn(self.client, self.model)
 
     def _execute_tool_call_from_dict(self, tool_call: dict, tools: list) -> str:
         func_name = tool_call["name"]
-        arguments = json.loads(tool_call["arguments"])
+        try:
+            arguments = json.loads(tool_call["arguments"]) if tool_call.get("arguments") else {}
+        except json.JSONDecodeError:
+            return f"[Tool Error] Invalid JSON arguments for '{func_name}': {tool_call.get('arguments')!r}"
         for tool in tools:
             if tool.name == func_name:
-                return tool.execute(**arguments)
+                return tool.run(**arguments)
         return f"Error: Tool '{func_name}' not found."
 

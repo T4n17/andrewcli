@@ -14,6 +14,11 @@ class ToolEvent:
         self.tool_args = tool_args
 
 
+class RouteEvent:
+    def __init__(self, tool_names: list[str]):
+        self.tool_names = tool_names
+
+
 class LLM:
     def __init__(self):
         self.api_base_url = os.getenv("API_BASE_URL", "http://localhost:8080/v1")
@@ -24,7 +29,7 @@ class LLM:
     def set_system_prompt(self, prompt: str):
         self.memory.add({"role": "system", "content": prompt})
 
-    async def generate(self, prompt: str, tools: List[Tool] = None, skills: List[Skill] = None, max_rounds: int = 10):
+    async def generate(self, prompt: str, tools: List[Tool] = None, skills: List[Skill] = None, max_rounds: int = 50):
         self.memory.add({"role": "user", "content": prompt})
 
         skills_schemas = [s.to_openai_schema() for s in skills] if skills else None

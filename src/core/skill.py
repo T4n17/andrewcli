@@ -25,6 +25,11 @@ class Skill(Tool):
         self.name = meta["name"]
         self.description = meta["description"]
         self.instructions = content.split("---")[2].strip()
+        tools_val = meta.get("tools", "")
+        self.required_tools: list[str] = (
+            [t.strip() for t in tools_val.strip("[]").split(",") if t.strip()]
+            if tools_val else []
+        )
     
     def execute(self) -> str:
         return (

@@ -33,14 +33,21 @@ class ExecuteCommand(Tool):
     def __init__(self):
         self.execute_bash_automatically = Config().execute_bash_automatically
     
-    def execute(self, command: str) -> str:
+    def execute(self, command: str, timeout: int = 10) -> str:
         import subprocess
         if not self.execute_bash_automatically:
             if input(str(command) + "\nAre you sure you want to execute this command? (y/n): ") != "y":
                 return "Command cancelled."
-        result = subprocess.run(command, shell=True, capture_output=True, text=True)
-        if result.stderr:
-            return ("Command error:", result.stderr)
-        if result.stdout != "":
-            return ("Command output:", result.stdout)
+        proc = subprocess.Popen(
+            command, shell=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return f"Command still running in background (pid {proc.pid})."
+        if stderr:
+            return f"Command error: {stderr}"
+        if stdout:
+            return f"Command output: {stdout}"
         return "Command executed successfully."

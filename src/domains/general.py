@@ -8,7 +8,7 @@ class GeneralDomain(Domain):
         WriteFile(),
         ReadFile(),
         ExecuteCommand(),
-        GetCurrentDate()
+        GetCurrentDate(),
     ]
     skills: list = [
         Example()

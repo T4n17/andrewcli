@@ -59,6 +59,47 @@ QScrollBar::sub-page:vertical {
     border: none;
 }
 
+QScrollBar:horizontal {
+    background: #1e1e2e;
+    height: 8px;
+    margin: 0;
+    border: none;
+    border-radius: 4px;
+}
+
+QScrollBar::handle:horizontal {
+    background: #585b70;
+    min-width: 30px;
+    border-radius: 4px;
+}
+
+QScrollBar::handle:horizontal:hover {
+    background: #89b4fa;
+}
+
+QScrollBar::add-line:horizontal,
+QScrollBar::sub-line:horizontal,
+QScrollBar::add-page:horizontal,
+QScrollBar::sub-page:horizontal {
+    background: none;
+    width: 0;
+    border: none;
+}
+
+QPushButton#DomainBtn {
+    color: #89b4fa;
+    background: transparent;
+    border: 1px solid #45475a;
+    border-radius: 4px;
+    font-size: 11px;
+    padding: 2px 8px;
+}
+
+QPushButton#DomainBtn:hover {
+    border-color: #89b4fa;
+    color: #cdd6f4;
+}
+
 QPushButton#CloseBtn {
     color: #6c7086;
     background: transparent;

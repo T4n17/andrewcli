@@ -3,7 +3,7 @@ import threading
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from src.core.llm import ToolEvent
+from src.core.llm import ToolEvent, RouteEvent
 
 
 _loop = None
@@ -52,6 +52,10 @@ class StreamWorker(QThread):
         async for token in self.domain.generate(self.message):
             if self._cancelled:
                 return
+            if isinstance(token, RouteEvent):
+                if token.tool_names:
+                    self.tool_status.emit(f"Loading: {', '.join(token.tool_names)}")
+                continue
             if isinstance(token, ToolEvent):
                 if token.tool_name:
                     first_val = str(next(iter(token.tool_args.values()), "")) if token.tool_args else ""

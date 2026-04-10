@@ -17,6 +17,7 @@ AndrewCLI/
     │   ├── domain.py               # Base Domain class (async generator)
     │   ├── llm.py                  # Async LLM client with streaming + tool-calling loop + ToolEvent
     │   ├── memory.py               # Rolling memory with background summarization
+    │   ├── router.py               # ToolRouter — selects tools/skills needed for a given request
     │   ├── skill.py                # Base Skill class (markdown-defined tools)
     │   └── tool.py                 # Base Tool class with run() error wrapper
     ├── ui/                         # CLI rendering layer
@@ -34,23 +35,32 @@ AndrewCLI/
     │   ├── style.css               # Qt stylesheet (Catppuccin Mocha theme)
     │   └── md.css                  # CSS for markdown rendering in QTextBrowser
     ├── tools/                      # Reusable tool definitions
-    │   └── common.py               # WriteFile, ReadFile, ExecuteCommand, GetCurrentDate
+    │   ├── common.py               # WriteFile, ReadFile, ExecuteCommand, GetCurrentDate
+    │   ├── google.py               # GoogleSearch, FetchPage, AskGoogleAI
+    │   └── google_scraper/         # Headless Chrome scraper backend (Playwright-based)
     ├── skills/
-    │   ├── myskills.py             # Skill subclass definitions (Example)
+    │   ├── myskills.py             # Skill subclass definitions
     │   └── skills_files/           # Skill instruction markdown files
     │       └── example.md
     └── domains/                    # Domain definitions
         ├── general.py              # General-purpose domain
+        ├── experimental.py         # Experimental domain (execute_command only)
         └── coding.py               # Coding-focused domain (WIP)
 ```
 
 ## Architecture
 
-AndrewCLI is built around six core concepts:
+AndrewCLI is built around seven core concepts:
 
 ### Config
 
 A centralized **Config** class (`src/shared/config.py`) loads `config.yaml` and exposes settings as attributes. Used by `app.py` to select the active domain, by tools like `ExecuteCommand` to read `execute_bash_automatically`, and by the tray app for window dimensions, position, opacity, and platform backend.
+
+### Router
+
+A **ToolRouter** (`src/core/router.py`) runs before each generation to select only the tools and skills relevant to the current request. It sends the user prompt — plus the memory summary and last exchange for context — along with the full tool/skill catalog to the model and asks it to return a JSON array of names. This keeps the tool list in the generation call minimal, reduces distraction, and avoids wasting tokens on irrelevant schemas.
+
+If the routing call fails or returns nothing useful, the router falls back to passing everything through unchanged.
 
 ### Domains
 
@@ -62,6 +72,16 @@ A **Tool** is a Python class that the LLM can call. Tools auto-generate their Op
 
 The base `Tool` class provides a `run()` wrapper around `execute()` that catches exceptions and returns a `[Tool Error]` string instead of crashing the agent. The LLM receives the error as a tool result and can recover gracefully.
 
+**Built-in tools** (`src/tools/common.py`): `WriteFile`, `ReadFile`, `ExecuteCommand`, `GetCurrentDate`.
+
+**Google tools** (`src/tools/google.py`): three tools backed by a headless Chrome scraper (`src/tools/google_scraper/`):
+
+| Tool | Description |
+|------|-------------|
+| `GoogleSearch` | Returns top organic results and the AI Overview for a query |
+| `FetchPage` | Fetches a URL and returns its readable text (JS-rendered) |
+| `AskGoogleAI` | Sends a prompt to Google AI Mode and returns its response — best for deep reasoning tasks |
+
 ### Skills
 
 A **Skill** is a markdown-defined tool. Instead of executing code, it returns a set of natural-language instructions that the LLM follows using the available tools. Skill subclasses are defined in `src/skills/myskills.py` and point to `.md` files in `src/skills/skills_files/` with YAML frontmatter:
@@ -70,12 +90,15 @@ A **Skill** is a markdown-defined tool. Instead of executing code, it returns a 
 ---
 name: example
 description: Execute an example skill
+tools: [tool_name_1, tool_name_2]
 ---
 
 # Instructions
 1. Do something using the available tools
 2. Acknowledge the user
 ```
+
+The optional `tools:` frontmatter field lists tool names that the skill requires. The domain injects those tools into the generation call even if the router didn't select them, ensuring the skill always has what it needs.
 
 When a skill is invoked, its instructions are returned with a `[SKILL INSTRUCTIONS]` prefix that directs the LLM to execute each step using tools rather than just summarizing them.
 
@@ -84,8 +107,9 @@ When a skill is invoked, its instructions are returned with a `[SKILL INSTRUCTIO
 A **rolling memory** system that maintains context across turns without growing the message history indefinitely.
 
 - After each turn, the last 1500 characters of conversation are extracted and merged with an existing summary using an LLM summarization call.
-- The merged summary (~500 words max) is persisted to `~/.andrewcli/data/memory.json`.
-- Older messages are trimmed — only the current turn is kept in the message array.
+- The merged summary (~300 words max) is persisted to `~/.andrewcli/data/memory.json`.
+- After summarizing, **all messages are cleared** — the next turn starts with an empty message array. The summary in the system prompt is the sole source of prior context.
+- The last user message and last assistant response are saved as `last_exchange` before clearing, so the router can resolve follow-up references ("translate that", "do it again") even on the first message of the next turn.
 - The summary is injected into the system prompt inside `<memory>` tags so the model always has context.
 - The merge LLM call runs as a **fire-and-forget background task** (`asyncio.create_task`), so the user gets the next prompt immediately. Sequential merges are serialized to prevent overwrites.
 
@@ -95,15 +119,18 @@ A **PyQt6 system tray application** that provides a GUI interface to AndrewCLI. 
 
 - **`bootstrap.py`** — reads `tray_platform` from `config.yaml` and sets `QT_QPA_PLATFORM` before Qt is imported (required for Wayland compatibility).
 - **`app.py`** — orchestrator. Loads the domain on a persistent asyncio event loop (shared daemon thread), manages `StreamWorker` lifecycle with cancellation support, and wires signals between the worker and the chat panel.
-- **`worker.py`** — `StreamWorker` is a `QThread` that runs `domain.generate()` on the shared asyncio loop via `asyncio.run_coroutine_threadsafe`. Emits `token_received`, `tool_status`, `finished`, and `error` signals. Supports cancellation: calling `cancel()` cancels the asyncio future and sets a flag checked during streaming.
-- **`panel.py`** — `ChatPanel` widget with a `QLineEdit` input, a `QTextBrowser` for streamed markdown output, and header controls (stop, expand/collapse, close). Includes a braille spinner animation (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) driven by a `QTimer` that shows status during generation and tool execution. Supports compact (input-only) and expanded (input + response) modes with configurable position and opacity.
+- **`worker.py`** — `StreamWorker` is a `QThread` that runs `domain.generate()` on the shared asyncio loop via `asyncio.run_coroutine_threadsafe`. Emits `token_received`, `tool_status`, `finished`, and `error` signals. Also handles `RouteEvent` to show which tools were loaded. Supports cancellation: calling `cancel()` cancels the asyncio future and sets a flag checked during streaming.
+- **`panel.py`** — `ChatPanel` widget with a `QLineEdit` input, a `QTextBrowser` for streamed markdown output, and header controls (domain button, stop, clear, expand/collapse, close). Includes a braille spinner animation (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) driven by a `QTimer` that shows status during generation and tool execution. Supports compact (input-only) and expanded (input + response) modes with configurable position and opacity. Conversation history is persisted to `~/.andrewcli/data/conversation.md` and restored on next launch.
 - **`icon.py`** — creates the system tray icon and context menu.
 - **`style.css`** / **`md.css`** — Catppuccin Mocha themed stylesheets for Qt widgets and markdown rendering.
 
 Key behaviors:
 - Submitting a new message while generating **cancels the previous generation** and waits for it to finish before starting a new one.
 - **Multi-turn conversations** work because the domain instance (and its memory) persists across all turns.
-- The spinner updates dynamically with tool names (e.g., `⠧ Running execute_command: query text...`).
+- The spinner updates dynamically with tool names (e.g., `⠧ Running execute_command: query text...`) and shows which tools were selected during routing (`⠧ Loading: google_search, fetch_page`).
+- The **Clear** button stops any running generation, clears the chat view, and resets the in-memory conversation.
+- The **domain button** in the header (or **TAB** in the input) cycles through available domains at runtime.
+- **ESC** hides the panel window.
 - Window position, size, opacity, and platform backend are all configurable via `config.yaml`.
 
 ### UI Layer (`src/ui/`)
@@ -126,11 +153,24 @@ The entire I/O pipeline is non-blocking:
 
 ## Interactive Controls
 
+### CLI (`app.py`)
+
 | Key | Context | Action |
 |-----|---------|--------|
 | **TAB** | Input prompt | Cycle to the next available domain |
 | **UP/DOWN** | Input prompt | Navigate through command history |
 | **ESC** | During response | Stop output streaming (background tasks still complete) |
+
+### Tray (`src/tray/`)
+
+| Key / Control | Context | Action |
+|---------------|---------|--------|
+| **TAB** | Input field | Cycle to the next available domain |
+| **Domain button** | Header | Cycle to the next available domain |
+| **Stop button** | Header (during generation) | Cancel the current generation |
+| **Clear button** | Header (expanded) | Clear chat view and reset conversation memory |
+| **ESC** | Anywhere in panel | Hide the panel window |
+| **▽ / △ button** | Header | Toggle between compact and expanded view |
 
 ## Setup
 
@@ -228,12 +268,15 @@ Then import and add `MyTool()` to your domain's `tools` list.
    ---
    name: my_skill
    description: What this skill does
+   tools: [tool_name_1, tool_name_2]
    ---
 
    # Instructions
    1. Step one
    2. Step two
    ```
+
+   The `tools:` field is optional. List any tools the skill requires that the router might not select on its own — they will be injected automatically when the skill is invoked.
 
 2. Create a `Skill` subclass in `src/skills/myskills.py` and add it to your domain's `skills` list:
 
@@ -262,5 +305,4 @@ Then set `domain: "research"` in `config.yaml`. The domain is loaded dynamically
 ## TODO
 
 - [ ] Write a skill that allows AndrewCLI to update itself with new tools, skills, or domains
-- [x] Implement system tray GUI mode (`python -m src.tray`)
 

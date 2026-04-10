@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -9,11 +10,15 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from src.shared.config import Config
 
 _DIR = Path(__file__).parent
+_CONVO_DIR = os.path.expanduser("~/.andrewcli/data")
+_CONVO_FILE = os.path.join(_CONVO_DIR, "conversation.md")
 
 
 class ChatPanel(QWidget):
     submitted = pyqtSignal(str)
     stop_requested = pyqtSignal()
+    clear_requested = pyqtSignal()
+    domain_switch = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -37,6 +42,13 @@ class ChatPanel(QWidget):
         self._spinner_timer.setInterval(80)
         self._spinner_timer.timeout.connect(self._tick_spinner)
 
+        self._render_timer = QTimer(self)
+        self._render_timer.setInterval(30)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._flush_render)
+        self._render_cursor_pos = 0
+
+        self._response_md = self._load_conversation()
         self._build_ui()
         self._set_compact()
 
@@ -47,6 +59,12 @@ class ChatPanel(QWidget):
 
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
+
+        self._domain_btn = QPushButton("general")
+        self._domain_btn.setObjectName("DomainBtn")
+        self._domain_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._domain_btn.clicked.connect(lambda: self.domain_switch.emit())
+        header.addWidget(self._domain_btn)
 
         self._label = QLabel("Ask Andrew")
         self._label.setObjectName("PanelLabel")
@@ -59,6 +77,13 @@ class ChatPanel(QWidget):
         self._stop_btn.clicked.connect(self._on_stop)
         self._stop_btn.hide()
         header.addWidget(self._stop_btn)
+
+        self._clear_btn = QPushButton("Clear")
+        self._clear_btn.setObjectName("StopBtn")
+        self._clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._clear_btn.clicked.connect(self._on_clear)
+        self._clear_btn.hide()
+        header.addWidget(self._clear_btn)
 
         header.addSpacing(6)
 
@@ -90,6 +115,7 @@ class ChatPanel(QWidget):
         self._entry.setObjectName("InputEntry")
         self._entry.setPlaceholderText("Type your message and press Enter...")
         self._entry.returnPressed.connect(self._on_submit)
+        self._entry.installEventFilter(self)
         layout.addWidget(self._entry)
 
     # -- spinner --------------------------------------------------------------
@@ -117,6 +143,7 @@ class ChatPanel(QWidget):
         self._toggle_btn.show()
         self._close_btn.show()
         self._stop_btn.hide()
+        self._clear_btn.hide()
         if not self._streaming:
             self._stop_spinner()
             self._label.setText("Ask Andrew")
@@ -133,6 +160,8 @@ class ChatPanel(QWidget):
         self._close_btn.show()
         if self._streaming:
             self._stop_btn.show()
+        if self._response_md:
+            self._clear_btn.show()
         self.setFixedSize(
             self._config.tray_width_expanded,
             self._config.tray_height_expanded,
@@ -196,13 +225,25 @@ class ChatPanel(QWidget):
         self._entry.setPlaceholderText("Reply...")
         self._entry.setFocus()
 
+    def _on_clear(self):
+        self._response_md = ""
+        self._browser.setPlainText("")
+        self._clear_btn.hide()
+        self._save_conversation()
+        self.clear_requested.emit()
+
     def _on_submit(self):
         text = self._entry.text().strip()
         if not text:
             return
         self._entry.clear()
-        self._response_md = ""
-        self._browser.setPlainText("")
+        if self._response_md:
+            self._response_md += "\n\n---\n\n"
+        self._response_md += f"**You:** {text}\n\n**Andrew:** "
+        self._browser.setMarkdown(self._response_md)
+        sb = self._browser.verticalScrollBar()
+        sb.setValue(sb.maximum())
+        self._render_cursor_pos = len(self._response_md)
         self._streaming = True
         self._start_spinner("Thinking...")
         self._stop_btn.show()
@@ -216,10 +257,19 @@ class ChatPanel(QWidget):
             self._stop_spinner()
             self._label.setText("Andrew")
         self._response_md += token
-        if self.isVisible():
-            self._browser.setMarkdown(self._response_md)
-            sb = self._browser.verticalScrollBar()
-            sb.setValue(sb.maximum())
+        if not self._render_timer.isActive():
+            self._render_timer.start()
+
+    def _flush_render(self):
+        new_text = self._response_md[self._render_cursor_pos:]
+        if not new_text or not self.isVisible():
+            return
+        self._render_cursor_pos = len(self._response_md)
+        cursor = self._browser.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.insertText(new_text)
+        sb = self._browser.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
     def on_tool_status(self, status: str):
         self._start_spinner(status)
@@ -227,8 +277,15 @@ class ChatPanel(QWidget):
     def on_stream_done(self):
         self._streaming = False
         self._stop_spinner()
+        self._render_timer.stop()
+        self._render_cursor_pos = len(self._response_md)
+        if self.isVisible():
+            self._browser.setMarkdown(self._response_md)
+            sb = self._browser.verticalScrollBar()
+            sb.setValue(sb.maximum())
         self._stop_btn.hide()
         self._label.setText("Andrew")
+        self._save_conversation()
         if self.isVisible():
             self._entry.setPlaceholderText("Reply...")
             self._entry.setFocus()
@@ -261,6 +318,31 @@ class ChatPanel(QWidget):
         self.activateWindow()
         self.raise_()
         self._entry.setFocus()
+
+    # -- persistence ----------------------------------------------------------
+
+    @staticmethod
+    def _load_conversation():
+        try:
+            with open(_CONVO_FILE, "r") as f:
+                return f.read()
+        except FileNotFoundError:
+            return ""
+
+    def _save_conversation(self):
+        os.makedirs(_CONVO_DIR, exist_ok=True)
+        with open(_CONVO_FILE, "w") as f:
+            f.write(self._response_md)
+
+    def set_domain_name(self, name: str):
+        self._domain_btn.setText(name)
+
+    def eventFilter(self, obj, event):
+        if obj is self._entry and event.type() == event.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Tab:
+                self.domain_switch.emit()
+                return True
+        return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:

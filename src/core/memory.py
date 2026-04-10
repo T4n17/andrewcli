@@ -7,7 +7,7 @@ MEMORY_FILE = os.path.join(MEMORY_DIR, "memory.json")
 
 MERGE_SYSTEM_PROMPT = (
     "You are a memory summarizer. Merge the existing summary and new conversation "
-    "excerpt into a single concise summary (max ~500 words). Keep facts, decisions, "
+    "excerpt into a single concise summary (max ~300 words). Keep facts, decisions, "
     "code written, tools used, and user preferences."
 )
 
@@ -17,6 +17,7 @@ class Memory:
         self.system_prompt = None
         self.messages = []
         self.summary = self._load_summary()
+        self.last_exchange = ""
         self._trimmed = False
         self._merge_task = None
 
@@ -34,7 +35,7 @@ class Memory:
         if self._trimmed:
             sys_content += (
                 "\n\n<context>Earlier conversation was summarized in the "
-                "memory blocks above. Only recent messages follow.</context>"
+                "memory blocks above. Full history has been cleared.</context>"
             )
         result.append({"role": "system", "content": sys_content})
         result.extend(self.messages)
@@ -93,14 +94,18 @@ class Memory:
             return combined[-2000:]
 
     def _trim_messages(self):
-        last_user_idx = None
-        for i in range(len(self.messages) - 1, -1, -1):
-            if self.messages[i].get("role") == "user":
-                last_user_idx = i
-                break
-        if last_user_idx is not None and last_user_idx > 0:
-            self.messages = self.messages[last_user_idx:]
-            self._trimmed = True
+        last_user = next(
+            (m["content"] for m in reversed(self.messages) if m.get("role") == "user"),
+            "",
+        )
+        last_assistant = next(
+            (m["content"] for m in reversed(self.messages) if m.get("role") == "assistant" and m.get("content")),
+            "",
+        )
+        if last_user or last_assistant:
+            self.last_exchange = f"user: {last_user}\nassistant: {last_assistant}".strip()
+        self.messages = []
+        self._trimmed = True
 
     def _load_summary(self) -> str:
         try:

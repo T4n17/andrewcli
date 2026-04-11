@@ -94,17 +94,21 @@ class Memory:
             return combined[-2000:]
 
     def _trim_messages(self):
-        last_user = next(
-            (m["content"] for m in reversed(self.messages) if m.get("role") == "user"),
-            "",
+        last_user_idx = next(
+            (i for i in range(len(self.messages) - 1, -1, -1) if self.messages[i].get("role") == "user"),
+            None,
         )
-        last_assistant = next(
-            (m["content"] for m in reversed(self.messages) if m.get("role") == "assistant" and m.get("content")),
-            "",
+        last_assistant_idx = next(
+            (i for i in range(len(self.messages) - 1, -1, -1)
+             if self.messages[i].get("role") == "assistant" and self.messages[i].get("content")),
+            None,
         )
-        if last_user or last_assistant:
-            self.last_exchange = f"user: {last_user}\nassistant: {last_assistant}".strip()
-        self.messages = []
+        user_content = self.messages[last_user_idx].get("content", "") if last_user_idx is not None else ""
+        assistant_content = self.messages[last_assistant_idx].get("content", "") if last_assistant_idx is not None else ""
+        if user_content or assistant_content:
+            self.last_exchange = f"user: {user_content}\nassistant: {assistant_content}".strip()
+        kept = sorted(i for i in [last_user_idx, last_assistant_idx] if i is not None)
+        self.messages = [self.messages[i] for i in kept]
         self._trimmed = True
 
     def _load_summary(self) -> str:
@@ -121,6 +125,25 @@ class Memory:
         os.makedirs(MEMORY_DIR, exist_ok=True)
         with open(MEMORY_FILE, "w") as f:
             json.dump({"version": 2, "summary": self.summary}, f, indent=2)
+
+    def rollback_turn(self):
+        """Discard messages from a stopped turn.
+        Saves the user request and any partial assistant response to last_exchange
+        so the router can resolve follow-up references on the next turn."""
+        last_user = next(
+            (m["content"] for m in reversed(self.messages) if m.get("role") == "user"),
+            "",
+        )
+        last_assistant = next(
+            (m["content"] for m in reversed(self.messages) if m.get("role") == "assistant" and m.get("content")),
+            "",
+        )
+        if last_user:
+            parts = [f"user: {last_user}"]
+            if last_assistant:
+                parts.append(f"assistant (partial, stopped by user): {last_assistant}")
+            self.last_exchange = "\n".join(parts)
+        self.messages = []
 
     def clear(self):
         self.messages = []

@@ -220,6 +220,12 @@ class ChatPanel(QWidget):
         self.stop_requested.emit()
         self._streaming = False
         self._stop_spinner()
+        self._render_timer.stop()
+        self._render_cursor_pos = len(self._response_md)
+        if self.isVisible():
+            self._browser.setMarkdown(self._response_md)
+            sb = self._browser.verticalScrollBar()
+            sb.setValue(sb.maximum())
         self._stop_btn.hide()
         self._label.setText("Andrew")
         self._entry.setPlaceholderText("Reply...")

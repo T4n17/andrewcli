@@ -7,7 +7,6 @@ import select
 import sys
 import termios
 import tty
-import argparse
 
 
 class AndrewCLI:
@@ -47,7 +46,7 @@ class AndrewCLI:
         except ValueError:
             next_name = domains[0]
         try:
-            self.domain = self.load_domain(next_name)
+            self.domain = self._load_domain(next_name)
         except ValueError:
             pass
 
@@ -120,10 +119,27 @@ class AndrewCLI:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
     async def _stream_response(self, prompt: str):
-        await self.renderer.render(self.domain.generate(prompt))
+        async with self._render_lock:
+            await self.renderer.render(self.domain.generate(prompt))
+
+    def _event_notify(self, event):
+        # Only print immediately if no dispatch will follow (no interleaving risk)
+        if not event.message:
+            sys.stdout.write(f"\n\033[33m◆ Event [{event.name}]: {event.description}\033[0m\n")
+            sys.stdout.flush()
+
+    async def _event_dispatch(self, event):
+        async with self._render_lock:
+            sys.stdout.write(f"\n\033[33m◆ Event [{event.name}]: {event.description}\033[0m\n")
+            sys.stdout.flush()
+            await self.renderer.render(self.domain.generate_event(event.message))
 
     async def run(self):
         print(f"Andrew is running...")
+        self._render_lock = asyncio.Lock()
+        self.domain.event_bus.notify = self._event_notify
+        self.domain.event_bus.dispatch = self._event_dispatch
+        asyncio.create_task(self.domain.event_bus.start())
         while True:
             prompt = f"[{self.domain_name}] Ask: "
             user_input = await self._read_input(prompt)
@@ -134,12 +150,6 @@ class AndrewCLI:
 
 if __name__ == "__main__":
     try:
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--gui", type=bool, default=False)
-        args = parser.parse_args()
-        if args.gui:
-            # TODO: Implement GUI mode
-            pass
         andrew = AndrewCLI()
         asyncio.run(andrew.run())
     except KeyboardInterrupt:

@@ -5,7 +5,7 @@ import sys
 import termios
 import tty
 
-from src.core.llm import ToolEvent
+from src.core.llm import ToolEvent, RouteEvent
 from src.ui.animations import Spinner
 from src.ui.filter import ThinkFilter
 
@@ -43,6 +43,12 @@ class StreamRenderer:
                         sys.stdout.write("\r\033[K")
                     sys.stdout.write("\033[0m [stopped]")
                     sys.stdout.flush()
+                    continue
+
+                if isinstance(token, RouteEvent):
+                    if token.tool_names:
+                        self.spinner.status = f"Routing: {', '.join(token.tool_names)}"
+                        self.spinner.restart()
                     continue
 
                 if isinstance(token, ToolEvent):

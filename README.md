@@ -15,19 +15,23 @@ Both modes (CLI and system tray) share the same core: same domains, same memory,
 
 ```
 AndrewCLI/
-├── app.py                          # CLI entry point — async REPL, domain switching, history
+├── andrewcli.py                    # Unified entry point (CLI, tray, server)
 ├── config.yaml                     # Configuration file
 ├── requirements.txt                # Python dependencies
 └── src/
     ├── shared/
     │   └── config.py               # Config class — loads config.yaml
     ├── core/
-    │   ├── domain.py               # Base Domain class (async generator)
+    │   ├── domain.py               # Base Domain class (async generator, event bus)
+    │   ├── event.py                # Event ABC + EventBus
     │   ├── llm.py                  # Async LLM client with streaming + tool-calling loop
     │   ├── memory.py               # Rolling memory with background summarization
     │   ├── router.py               # ToolRouter — selects only needed tools/skills per request
     │   ├── skill.py                # Base Skill class (markdown-defined tools)
     │   └── tool.py                 # Base Tool class — auto-generates OpenAI schemas from type hints
+    ├── events/                     # Event definitions (auto-loaded by domain)
+    │   ├── timer.py                # TimerEvent — fires on a fixed interval
+    │   └── file.py                 # FileEvent — fires when a watched file is modified
     ├── ui/                         # CLI rendering layer
     │   ├── animations.py           # Spinner (async, dynamic status)
     │   ├── filter.py               # ThinkFilter — parses <think> tags for reasoning display
@@ -92,7 +96,9 @@ A centralized `Config` class (`src/shared/config.py`) loads `config.yaml` and ex
 
 ### Domains
 
-A **Domain** groups a system prompt, a set of tools, and a set of skills into a single persona. Defined as Python classes in `src/domains/`, loaded dynamically from `config.yaml`. The `generate()` method is an async generator that yields tokens as they stream in. Domains can be **switched at runtime** with TAB.
+A **Domain** groups a system prompt, a set of tools, a set of skills, and a list of events into a single persona. Defined as Python classes in `src/domains/`, loaded dynamically from `config.yaml`. The `generate()` method is an async generator that yields tokens as they stream in. Domains can be **switched at runtime** with TAB.
+
+Each domain owns an `EventBus` instance built from its `events` list. The bus is started by the app layer alongside the main loop.
 
 ### Tools
 
@@ -120,18 +126,67 @@ The optional `tools:` field lists tools the skill requires — they are injected
 
 When invoked, the skill returns its instructions with a `[SKILL INSTRUCTIONS]` prefix that directs the LLM to execute each step via tools rather than summarizing them.
 
+### Events
+
+An **Event** is a self-contained background observer. Each event runs as an asyncio task inside the domain's `EventBus` and defines two things:
+
+- **`condition()`** — an async coroutine that blocks until the triggering condition is met. It can be a sleep, a file-modification check, a queue wait, or any awaitable.
+- **`trigger()`** — called once `condition()` returns. Performs any side-effect needed before the agent message is sent.
+
+If the event sets a `message` string, the `EventBus` automatically dispatches it to the agent via `domain.generate_event()` — a fresh, isolated LLM call that never touches the conversation memory or affects routing for user queries.
+
+**Built-in events** (`src/events/`):
+
+| Event | Description |
+|-------|-------------|
+| `TimerEvent` | Fires every N seconds (configurable interval) |
+| `FileEvent` | Fires when a watched file's modification time changes |
+
+**Notification** — when an event fires, both surfaces are notified:
+- **CLI**: a colored banner (`◆ Event [name]`) is printed, followed by the agent's streamed response.
+- **Tray**: a system tray balloon message appears and the panel opens to show the response.
+
+Event responses are rendered exactly like user-initiated responses (routing, spinner, tool calls) but use an isolated LLM instance so the conversation memory is never polluted.
+
+**Defining a new event:**
+
+```python
+import asyncio
+from src.core.event import Event
+
+class MyEvent(Event):
+    name = "my_event"
+    description = "Fires when something happens"
+    message = "Something happened, please respond."  # sent to agent; omit if no agent call needed
+
+    async def condition(self):
+        await asyncio.sleep(30)  # or watch a file, wait on a queue, etc.
+
+    async def trigger(self):
+        pass  # optional side-effect before the agent message
+```
+
+Add it to your domain's `events` list:
+
+```python
+events: list = [
+    MyEvent(),
+]
+```
+
 ### UI Layer
 
-- **`Spinner`** (`animations.py`) — async spinner with a dynamic `.status` property. Shows what the agent is doing in real time: `⠴ Thinking...`, `⠧ Running execute_command: ls -la`, `⠋ Running read_file: config.yaml`
+- **`Spinner`** (`animations.py`) — async spinner with a dynamic `.status` property. Shows what the agent is doing in real time: `⠴ Thinking...`, `⠧ Running execute_command: ls -la`, `⠋ Routing: google_search, fetch_page`
 - **`ThinkFilter`** (`filter.py`) — streaming parser for `<think>...</think>` tags, handles tags split across token boundaries. Renders reasoning in dim italic while keeping the final answer in normal text
-- **`StreamRenderer`** (`renderer.py`) — orchestrates the full output pipeline: spinner lifecycle, `ToolEvent` processing, think filtering, typewriter-effect streaming, ESC-to-stop
+- **`StreamRenderer`** (`renderer.py`) — orchestrates the full output pipeline: spinner lifecycle, `RouteEvent` and `ToolEvent` processing, think filtering, typewriter-effect streaming, ESC-to-stop
 
 ### Tray App
 
 A **PyQt6 system tray application** that uses the same domain classes and async logic as the CLI.
 
 - **`worker.py`** — `StreamWorker` QThread runs `domain.generate()` on a shared asyncio event loop via `asyncio.run_coroutine_threadsafe`. Emits `token_received`, `tool_status`, `finished`, and `error` signals. Cancellation cancels the asyncio future and sets a flag checked during streaming.
-- **`panel.py`** — `ChatPanel` with a `QLineEdit` input, `QTextBrowser` for streamed markdown output, and header controls. Braille spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) driven by `QTimer` shows tool names during execution and routing (`⠧ Loading: google_search, fetch_page`). Conversation history is persisted to `~/.andrewcli/data/conversation.md` and restored on next launch.
+- **`panel.py`** — `ChatPanel` with a `QLineEdit` input, `QTextBrowser` for streamed markdown output, and header controls. Braille spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) driven by `QTimer` shows tool names during execution and routing. Conversation history is persisted to `~/.andrewcli/data/conversation.md` and restored on next launch.
+- **Event bridge** — the `EventBus` runs on the shared asyncio loop. A `queue.SimpleQueue` bridges it to the Qt main thread. A `QTimer` polling at 100 ms drains the queue, shows balloon notifications via `QSystemTrayIcon.showMessage`, and routes tokens to the panel — all without blocking the Qt event loop or the asyncio loop.
 - Submitting a new message while generating **cancels the previous generation** and waits before starting a new one.
 - **Multi-turn conversations** work because the domain instance (and its memory) persists across all turns.
 
@@ -141,12 +196,13 @@ A **PyQt6 system tray application** that uses the same domain classes and async 
 
 The entire I/O pipeline is non-blocking:
 
-1. **`app.py`** — runs under `asyncio.run()`. Input read via a custom async `_read_input()` using cbreak mode, supporting TAB and UP/DOWN history.
+1. **`andrewcli.py`** — runs under `asyncio.run()`. Input read via a custom async `_read_input()` using cbreak mode, supporting TAB and UP/DOWN history.
 2. **Router** — async LLM call that resolves the minimal tool/skill set for the request.
-3. **Spinner** — `asyncio` task that animates and updates status text from `ToolEvent`s.
+3. **Spinner** — `asyncio` task that animates and updates status text from `RouteEvent` and `ToolEvent`s.
 4. **Streaming** — `LLM.generate()` is an async generator. Tokens are yielded as they arrive. `ToolEvent` objects are also yielded to update the spinner.
 5. **Tool calls** — accumulated from streamed chunks, executed via `tool.run()`, looped back automatically. Malformed JSON arguments are caught and reported instead of crashing.
 6. **Memory summarization** — fires in the background after the response completes; no user-facing delay.
+7. **Event bus** — runs as a set of concurrent asyncio tasks alongside the main loop. Each event waits on its own `condition()` coroutine independently.
 
 ---
 
@@ -195,18 +251,22 @@ The entire I/O pipeline is non-blocking:
 4. **Run:**
 
    ```bash
-   # CLI mode
-   python app.py
+   # CLI mode (default)
+   python andrewcli.py
 
    # System tray GUI
-   python -m src.tray
+   python andrewcli.py --tray
+
+   # FastAPI server
+   python andrewcli.py --server
+   python andrewcli.py --server --host 127.0.0.1 --port 9000
    ```
 
 ---
 
 ## Interactive Controls
 
-### CLI (`app.py`)
+### CLI
 
 | Key | Context | Action |
 |-----|---------|--------|
@@ -214,7 +274,7 @@ The entire I/O pipeline is non-blocking:
 | **UP / DOWN** | Input prompt | Navigate command history |
 | **ESC** | During response | Stop streaming (background tasks still complete) |
 
-### Tray (`src/tray/`)
+### Tray
 
 | Key / Control | Context | Action |
 |---------------|---------|--------|
@@ -230,18 +290,22 @@ The entire I/O pipeline is non-blocking:
 ## Usage
 
 ```
-$ python app.py
+$ python andrewcli.py
 Andrew is running...
 [general] Ask: Write "hello" to greeting.txt
+⠋ Routing: write_file
 ⠋ Running write_file: greeting.txt
 Andrew: File greeting.txt written successfully.
 [general] Ask: ↑                          # UP recalls last message
 [general] Ask: [TAB]                      # TAB switches domain
 Switched to domain: coding
 [coding] Ask:
+
+◆ Event [timer]: Fires every N seconds   # event fires in background
+Andrew: ...
 ```
 
-The agent chains tool calls automatically — a skill might instruct the LLM to read a file, transform its contents, and write the result back. The spinner shows which tool is running in real time; model reasoning inside `<think>` tags is displayed in dim italic.
+The agent chains tool calls automatically — a skill might instruct the LLM to read a file, transform its contents, and write the result back. The spinner shows which tool is running in real time; model reasoning inside `<think>` tags is displayed in dim italic. Events fire independently in the background and interleave cleanly with user interactions.
 
 ---
 
@@ -302,9 +366,38 @@ class ResearchDomain(Domain):
     system_prompt: str = "You are a research assistant."
     tools: list = []
     skills: list = []
+    events: list = []
 ```
 
 Set `domain: "research"` in `config.yaml`. The file name must match the config value; the class must be named `<Name>Domain`.
+
+### Add a new Event
+
+Create a file in `src/events/` (e.g. `my_event.py`):
+
+```python
+import asyncio
+from src.core.event import Event
+
+class MyEvent(Event):
+    name = "my_event"
+    description = "Short description shown in notifications"
+    message = "Prompt sent to the agent when this event fires."
+
+    async def condition(self):
+        await asyncio.sleep(60)  # block until condition is met
+
+    async def trigger(self):
+        pass  # optional side-effect before the agent message
+```
+
+Add it to your domain:
+
+```python
+from src.events.my_event import MyEvent
+
+events: list = [MyEvent()]
+```
 
 ---
 

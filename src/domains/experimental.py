@@ -16,4 +16,5 @@ class ExperimentalDomain(Domain):
         ExecuteCommand()
     ]
     skills: list = []
+    events: list = []
 

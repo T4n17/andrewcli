@@ -306,6 +306,20 @@ class ChatPanel(QWidget):
             self._browser.setMarkdown(self._response_md)
             self._entry.setFocus()
 
+    def start_event_response(self, event_name: str):
+        """Prepare the panel to receive a streamed agent response from an event."""
+        if self._response_md:
+            self._response_md += "\n\n---\n\n"
+        self._response_md += f"**◆ Event [{event_name}]:** "
+        self._render_cursor_pos = len(self._response_md)
+        self._streaming = True
+        self._start_spinner(f"Event: {event_name}")
+        self._stop_btn.show()
+        if not self._expanded:
+            self._set_expanded()
+        else:
+            self._browser.setMarkdown(self._response_md)
+
     # -- public interface -----------------------------------------------------
 
     def toggle(self):

@@ -15,7 +15,10 @@ class ToolRouter:
         if len(all_items) <= 1:
             return tools, skills
 
-        catalog = "\n".join(f"- {item.name}: {item.description}" for item in all_items)
+        skill_names = {s.name for s in skills}
+        skills_catalog = "\n".join(f"- [SKILL] {item.name}: {item.description}" for item in skills)
+        tools_catalog = "\n".join(f"- [TOOL] {item.name}: {item.description}" for item in tools)
+        catalog = skills_catalog + ("\n" if skills_catalog and tools_catalog else "") + tools_catalog
 
         context_parts = []
         if summary:
@@ -27,8 +30,10 @@ class ToolRouter:
         routing_prompt = (
             f"{context_block}"
             f'User request: "{prompt}"\n\n'
-            f"Available tools/skills:\n{catalog}\n\n"
-            'Which of these are needed to fulfill the request? '
+            f"Available skills and tools:\n{catalog}\n\n"
+            "IMPORTANT: Always prefer [SKILL] items over [TOOL] items. "
+            "If a skill can handle the request, choose it instead of individual tools. "
+            "Only select individual tools when no skill matches.\n\n"
             'Reply with a JSON array of names only, e.g. ["name1", "name2"]. '
             "Return [] if none are needed (pure conversation)."
         )
@@ -45,9 +50,12 @@ class ToolRouter:
             match = re.search(r'\[.*?\]', content, re.DOTALL)
             if match:
                 needed = set(json.loads(match.group()))
+                matched_skills = [s for s in skills if s.name in needed]
+                if matched_skills:
+                    return [], matched_skills
                 return (
                     [t for t in tools if t.name in needed],
-                    [s for s in skills if s.name in needed],
+                    [],
                 )
         except Exception:
             pass

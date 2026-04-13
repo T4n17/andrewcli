@@ -35,8 +35,8 @@ class LLM:
         skills_schemas = [s.to_openai_schema() for s in skills] if skills else None
         tool_schemas = [t.to_openai_schema() for t in tools] if tools else None
 
-        all_schemas = (tool_schemas or []) + (skills_schemas or []) or None
-        all_callables = (tools or []) + (skills or [])
+        all_schemas = (skills_schemas or []) + (tool_schemas or []) or None
+        all_callables = (skills or []) + (tools or [])
 
         for _ in range(max_rounds):
             kwargs = {"model": self.model, "messages": self.memory.get(), "stream": True}

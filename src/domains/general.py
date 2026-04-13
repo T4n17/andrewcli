@@ -1,7 +1,7 @@
 from src.core.domain import Domain
 from src.tools.common import WriteFile, ReadFile, ExecuteCommand, GetCurrentDate
-from src.skills.myskills import Example
-from src.events.file import FileEvent
+from src.tools.skills import SkillCompiler
+from src.skills.myskills import Example, CreateSkill
 
 class GeneralDomain(Domain):
     system_prompt: str = (
@@ -14,11 +14,12 @@ class GeneralDomain(Domain):
         WriteFile(),
         ReadFile(),
         ExecuteCommand(),
-        GetCurrentDate()
+        GetCurrentDate(),
+        SkillCompiler()
     ]
     skills: list = [
-        Example()
+        Example(),
+        CreateSkill()
     ]
     events: list = [
-        FileEvent()
     ]

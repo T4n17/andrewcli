@@ -1,7 +1,7 @@
+from src.core.registry import available_domains, load_domain
 from src.shared.config import Config
 from src.ui.renderer import StreamRenderer
 import asyncio
-import importlib
 import os
 import select
 import sys
@@ -11,33 +11,29 @@ import tty
 
 class AndrewCLI:
 
-    def __init__(self):
+    def __init__(self, voice_enabled: bool = False):
         self.config = Config()
         self.history = []
         self.renderer = StreamRenderer()
-        self.domain = self._load_domain()
+        self.domain_name = self.config.domain
+        self.domain = load_domain(self.domain_name)
 
-    def _load_domain(self, domain_name=None):
-        try:
-            self.domain_name = domain_name or self.config.domain
-            module = importlib.import_module(f"src.domains.{self.domain_name}")
-            class_name = f"{self.domain_name.capitalize()}Domain"
-            domain_class = getattr(module, class_name)
-            return domain_class()
-        except KeyError:
-            raise ValueError("Domain not found in config")
-        except (ModuleNotFoundError, AttributeError) as e:
-            raise ValueError(f"Could not load domain '{self.domain_name}': {e}")
-
-    def _get_available_domains(self):
-        domains = []
-        for f in os.listdir('src/domains'):
-            if f.endswith('.py') and f != '__init__.py':
-                domains.append(f[:-3])
-        return sorted(domains)
+        # Voice I/O is optional and additive. When enabled the CLI accepts
+        # both typed prompts and wake-word-triggered spoken prompts; each
+        # typed or spoken response also streams through TTS. Constructed
+        # eagerly on purpose: failing fast with a clear error beats a
+        # mysterious silence later on.
+        self.voice_enabled = voice_enabled
+        self.stt = None
+        self.tts = None
+        if voice_enabled:
+            from src.voice import build_voice_io
+            self.stt, self.tts = build_voice_io(self.config)
+        # Single-producer prompt channel fed by stdin and (optionally) STT.
+        self._prompts: asyncio.Queue[tuple[str, str]] | None = None
 
     def _cycle_domain(self):
-        domains = self._get_available_domains()
+        domains = available_domains()
         if len(domains) <= 1:
             return
         try:
@@ -46,9 +42,11 @@ class AndrewCLI:
         except ValueError:
             next_name = domains[0]
         try:
-            self.domain = self._load_domain(next_name)
+            new_domain = load_domain(next_name)
         except ValueError:
-            pass
+            return
+        self.domain = new_domain
+        self.domain_name = next_name
 
     async def _read_input(self, prompt):
         fd = sys.stdin.fileno()
@@ -119,8 +117,52 @@ class AndrewCLI:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
     async def _stream_response(self, prompt: str):
-        async with self._render_lock:
+        # Serialization with events is handled by Domain.busy_lock.
+        # When voice is on we tee the token stream: the renderer
+        # consumes one branch (stdout) and the TTS consumes the other
+        # (speaker). The domain iterator must only be iterated once, so
+        # the tee lives inside an async generator fed from the single
+        # source.
+        if not self.voice_enabled:
             await self.renderer.render(self.domain.generate(prompt))
+            return
+
+        tts_queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+        async def teed():
+            try:
+                async for item in self.domain.generate(prompt):
+                    if isinstance(item, str):
+                        await tts_queue.put(item)
+                    yield item
+            finally:
+                # Ensure the TTS consumer terminates even if the
+                # renderer raises or the producer is cancelled.
+                await tts_queue.put(None)
+
+        async def tts_feed():
+            while True:
+                tok = await tts_queue.get()
+                if tok is None:
+                    return
+                yield tok
+
+        # Strip markdown punctuation before TTS so the speaker doesn't
+        # read ``**bold**`` as "asterisk asterisk bold asterisk asterisk"
+        # (and drops URL text after ``[link]`` closes).
+        from src.voice import strip_markdown
+        tts_task = asyncio.create_task(
+            self.tts.speak_stream(strip_markdown(tts_feed()))
+        )
+        try:
+            await self.renderer.render(teed())
+        finally:
+            # Wait for any trailing audio to flush before accepting the
+            # next turn so the final sentence isn't cut off.
+            try:
+                await tts_task
+            except asyncio.CancelledError:
+                pass
 
     def _event_notify(self, event):
         # Only print immediately if no dispatch will follow (no interleaving risk)
@@ -129,20 +171,95 @@ class AndrewCLI:
             sys.stdout.flush()
 
     async def _event_dispatch(self, event):
-        async with self._render_lock:
-            sys.stdout.write(f"\n\033[33m◆ Event [{event.name}]: {event.description}\033[0m\n")
+        # Domain.busy_lock serializes this with user turns and other events,
+        # so the event header and its streamed response cannot interleave
+        # with a concurrent response on the terminal.
+        sys.stdout.write(f"\n\033[33m◆ Event [{event.name}]: {event.description}\033[0m\n")
+        sys.stdout.flush()
+        await self.renderer.render(self.domain.generate_event(event.message))
+
+    async def _get_next_prompt(self, prompt_str: str) -> str:
+        """Return the next user prompt, whether typed or spoken.
+
+        With voice off this is just ``_read_input``. With voice on we
+        race the stdin reader against an :meth:`SpeechToText.listen_once`
+        call; whichever produces first wins and the other is cancelled.
+        If voice wins but returns an empty transcript (wake word fired
+        but no speech / unintelligible), we silently re-arm both
+        producers rather than surfacing a confusing blank prompt.
+        """
+        if not self.voice_enabled:
+            return await self._read_input(prompt_str)
+
+        # Only print the prompt on the first pass; silent re-arms after
+        # empty-transcript cycles must not reprint it (would produce
+        # `[general] Ask: [general] Ask: ...` on the same line).
+        first_pass = True
+
+        def _on_wake():
+            # Visual cue: overwrite the current prompt line with a
+            # "listening" indicator so the user knows the wake word was
+            # heard and we're now recording their actual request.
+            sys.stdout.write(
+                f"\r\033[K{prompt_str}\033[35m🎙 listening...\033[0m"
+            )
             sys.stdout.flush()
-            await self.renderer.render(self.domain.generate_event(event.message))
+
+        while True:
+            read_prompt = prompt_str if first_pass else ""
+            first_pass = False
+            typed_task = asyncio.create_task(self._read_input(read_prompt))
+            voice_task = asyncio.create_task(self.stt.listen_once(on_wake=_on_wake))
+            try:
+                done, _ = await asyncio.wait(
+                    {typed_task, voice_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            except BaseException:
+                typed_task.cancel()
+                voice_task.cancel()
+                raise
+
+            if typed_task in done:
+                voice_task.cancel()
+                try:
+                    await voice_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                return typed_task.result()
+
+            # Voice won. Stop the terminal reader so termios is restored.
+            typed_task.cancel()
+            try:
+                await typed_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+            spoken = (voice_task.result() or "").strip()
+            if not spoken:
+                # Empty transcript: wake word misfired or no speech.
+                # Silently re-arm without disturbing the prompt line.
+                continue
+
+            # Rewrite the prompt with the transcribed text so the
+            # terminal log reads the same as a typed-in prompt.
+            sys.stdout.write(f"\r\033[K{prompt_str}\033[35m🎙 {spoken}\033[0m\n")
+            sys.stdout.flush()
+            return spoken
 
     async def run(self):
-        print(f"Andrew is running...")
-        self._render_lock = asyncio.Lock()
+        print(
+            "Andrew is running"
+            + (f" (voice on - say '{self.stt.wake_word}' or just type)"
+               if self.voice_enabled else "")
+            + "..."
+        )
         self.domain.event_bus.notify = self._event_notify
         self.domain.event_bus.dispatch = self._event_dispatch
         asyncio.create_task(self.domain.event_bus.start())
         while True:
             prompt = f"[{self.domain_name}] Ask: "
-            user_input = await self._read_input(prompt)
+            user_input = await self._get_next_prompt(prompt)
             if not user_input.strip():
                 continue
             await self._stream_response(user_input)

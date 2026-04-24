@@ -1,11 +1,10 @@
-import asyncio
 import os
 import select
 import sys
 import termios
 import tty
 
-from src.core.llm import ToolEvent, RouteEvent
+from src.core.llm import ToolEvent, RouteEvent, format_tool_status
 from src.ui.animations import Spinner
 from src.ui.filter import ThinkFilter
 
@@ -45,26 +44,13 @@ class StreamRenderer:
                     sys.stdout.flush()
                     continue
 
-                if isinstance(token, RouteEvent):
-                    if token.tool_names:
-                        self.spinner.status = f"Routing: {', '.join(token.tool_names)}"
+                if isinstance(token, (RouteEvent, ToolEvent)):
+                    status = format_tool_status(token)
+                    if isinstance(token, ToolEvent):
+                        sys.stdout.write("\r\033[K")
+                    if status is not None:
+                        self.spinner.status = status
                         self.spinner.restart()
-                    continue
-
-                if isinstance(token, ToolEvent):
-                    sys.stdout.write("\r\033[K")
-                    if token.tool_name:
-                        detail = ""
-                        if token.tool_args:
-                            first_val = str(next(iter(token.tool_args.values()), ""))
-                            if len(first_val) > 60:
-                                first_val = first_val[:57] + "..."
-                            if first_val:
-                                detail = f": {first_val}"
-                        self.spinner.status = f"Running {token.tool_name}{detail}"
-                    else:
-                        self.spinner.status = "Thinking..."
-                    self.spinner.restart()
                     sys.stdout.flush()
                     continue
 
@@ -80,13 +66,13 @@ class StreamRenderer:
                 for text, is_thinking in segments:
                     if is_thinking:
                         sys.stdout.write("\033[2;3m")
-                    for char in text:
-                        sys.stdout.write(char)
-                        sys.stdout.flush()
-                        await asyncio.sleep(0.02)
+                    # Stream text at token granularity rather than
+                    # per-character — the LLM already paces delivery,
+                    # and a per-char sleep made long responses crawl.
+                    sys.stdout.write(text)
                     if is_thinking:
                         sys.stdout.write("\033[0m")
-                        sys.stdout.flush()
+                    sys.stdout.flush()
 
             if self.spinner.is_running:
                 self.spinner.stop()

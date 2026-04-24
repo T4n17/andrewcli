@@ -1,36 +1,63 @@
-import inspect
-from src.core.tool import Tool
+import re
 
-TYPE_MAP = {
-    str: "string",
-    int: "integer",
-    float: "number",
-    bool: "boolean",
-    list: "array",
-    dict: "object",
-}
+from src.core.tool import Tool
+from src.shared.paths import SKILLS_DIR
+
+
+# Match standard --- frontmatter --- body format with any surrounding whitespace.
+_FRONTMATTER_RE = re.compile(r"^\s*---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
+
 
 class Skill(Tool):
+    """A Skill is a Tool whose `execute()` returns scripted instructions.
+
+    Each skill lives in a standalone markdown file under
+    `src/skills/skills_files/<name>.md` with a YAML-style frontmatter
+    describing its name, description, and the tools it relies on.
+    """
+
     skill_file: str
 
     def __init__(self):
-        with open("src/skills/skills_files/" + self.skill_file, "r") as f:
-            content = f.read()
-        frontmatter = content.split("---")[1]
-        meta = {}
-        for line in frontmatter.strip().splitlines():
-            if ":" in line:
-                key, value = line.split(":", 1)
-                meta[key.strip()] = value.strip()
+        path = SKILLS_DIR / self.skill_file
+        try:
+            content = path.read_text()
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f"Skill file not found: {path}") from exc
+
+        match = _FRONTMATTER_RE.match(content)
+        if not match:
+            raise ValueError(
+                f"Skill file '{path}' is missing valid frontmatter "
+                "(expected '---\\n<meta>\\n---\\n<body>')"
+            )
+        frontmatter, body = match.group(1), match.group(2)
+
+        meta: dict[str, str] = {}
+        for line in frontmatter.splitlines():
+            line = line.strip()
+            if not line or ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            meta[key.strip()] = value.strip()
+
+        for required_key in ("name", "description"):
+            if required_key not in meta:
+                raise ValueError(
+                    f"Skill '{path}' is missing required frontmatter key '{required_key}'"
+                )
+
         self.name = meta["name"]
         self.description = meta["description"]
-        self.instructions = content.split("---")[2].strip()
-        tools_val = meta.get("tools", "")
-        self.required_tools: list[str] = (
-            [t.strip() for t in tools_val.strip("[]").split(",") if t.strip()]
-            if tools_val else []
-        )
-    
+        self.instructions = body.strip()
+
+        tools_val = meta.get("tools", "").strip()
+        if tools_val.startswith("[") and tools_val.endswith("]"):
+            tools_val = tools_val[1:-1]
+        self.required_tools: list[str] = [
+            t.strip() for t in tools_val.split(",") if t.strip()
+        ]
+
     def execute(self) -> str:
         return (
             "[SKILL INSTRUCTIONS] You MUST now execute the following steps one by one "
@@ -38,27 +65,3 @@ class Skill(Tool):
             "Call the appropriate tools to carry out each action.\n\n"
             + self.instructions
         )
-
-    def to_openai_schema(self) -> dict:
-        sig = inspect.signature(self.execute)
-        properties = {}
-        required = []
-        for param_name, param in sig.parameters.items():
-            if param_name in ("self", "args", "kwargs"):
-                continue
-            json_type = TYPE_MAP.get(param.annotation, "string")
-            properties[param_name] = {"type": json_type}
-            if param.default is inspect.Parameter.empty:
-                required.append(param_name)
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required,
-                },
-            },
-        }

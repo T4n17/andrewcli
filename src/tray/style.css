@@ -126,3 +126,29 @@ QPushButton#StopBtn:hover {
     background: #f38ba8;
     color: #1e1e2e;
 }
+
+QPushButton#MicBtn {
+    color: #a6e3a1;
+    background: transparent;
+    border: 1px solid #a6e3a1;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: bold;
+    padding: 2px 8px;
+    margin-right: 4px;
+}
+
+QPushButton#MicBtn:hover {
+    background: #a6e3a1;
+    color: #1e1e2e;
+}
+
+QPushButton#MicBtn[voiceOn="false"] {
+    color: #6c7086;
+    border-color: #45475a;
+}
+
+QPushButton#MicBtn[voiceOn="false"]:hover {
+    background: #45475a;
+    color: #cdd6f4;
+}

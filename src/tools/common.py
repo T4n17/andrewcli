@@ -32,11 +32,17 @@ class ExecuteCommand(Tool):
 
     def __init__(self):
         self.execute_bash_automatically = Config().execute_bash_automatically
-    
+
     def execute(self, command: str, timeout: int = 10) -> str:
         import subprocess
         if not self.execute_bash_automatically:
-            if input(str(command) + "\nAre you sure you want to execute this command? (y/n): ") != "y":
+            try:
+                answer = input(
+                    str(command) + "\nAre you sure you want to execute this command? (y/n): "
+                )
+            except EOFError:
+                answer = "n"
+            if answer.strip().lower() != "y":
                 return "Command cancelled."
         proc = subprocess.Popen(
             command, shell=True,
@@ -45,9 +51,17 @@ class ExecuteCommand(Tool):
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
+            # Intentionally leave the process running so long commands
+            # can keep executing in the background while the agent
+            # continues with the rest of the workflow.
             return f"Command still running in background (pid {proc.pid})."
-        if stderr:
-            return f"Command error: {stderr}"
+
+        # Preserve both streams: many commands write useful info to both.
+        parts = []
         if stdout:
-            return f"Command output: {stdout}"
-        return "Command executed successfully."
+            parts.append(f"stdout:\n{stdout}")
+        if stderr:
+            parts.append(f"stderr:\n{stderr}")
+        if not parts:
+            return "Command executed successfully."
+        return "\n".join(parts)

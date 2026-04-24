@@ -3,7 +3,7 @@ import threading
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from src.core.llm import ToolEvent, RouteEvent
+from src.core.llm import ToolEvent, RouteEvent, format_tool_status
 
 
 _loop = None
@@ -25,10 +25,14 @@ class StreamWorker(QThread):
     finished = pyqtSignal()
     error = pyqtSignal(str)
 
-    def __init__(self, message, domain):
+    def __init__(self, message, domain, tts=None):
         super().__init__()
         self.message = message
         self.domain = domain
+        # Optional TTS backend; when set, each text token is also fed
+        # into its sentence-level streaming queue so the chat panel
+        # and the speaker hear the same response simultaneously.
+        self.tts = tts
         self._future = None
         self._cancelled = False
 
@@ -49,22 +53,51 @@ class StreamWorker(QThread):
                 self.error.emit(str(e))
 
     async def _stream(self):
-        async for token in self.domain.generate(self.message):
-            if self._cancelled:
-                return
-            if isinstance(token, RouteEvent):
-                if token.tool_names:
-                    self.tool_status.emit(f"Loading: {', '.join(token.tool_names)}")
-                continue
-            if isinstance(token, ToolEvent):
-                if token.tool_name:
-                    first_val = str(next(iter(token.tool_args.values()), "")) if token.tool_args else ""
-                    if len(first_val) > 60:
-                        first_val = first_val[:57] + "..."
-                    detail = f": {first_val}" if first_val else ""
-                    self.tool_status.emit(f"Running {token.tool_name}{detail}")
-                else:
-                    self.tool_status.emit("Thinking...")
-                continue
-            self.token_received.emit(token)
+        tts_queue = None
+        tts_task = None
+        if self.tts is not None:
+            from src.voice import strip_markdown
+            tts_queue = asyncio.Queue()
+
+            async def _feed():
+                while True:
+                    tok = await tts_queue.get()
+                    if tok is None:
+                        return
+                    yield tok
+
+            # Render markdown *before* TTS so the speaker doesn't say
+            # "asterisk asterisk bold asterisk asterisk"; strip_markdown
+            # is a stateful char-level filter that removes ``*_~`#``
+            # and elides ``(url)`` after a link ``]``.
+            tts_task = asyncio.create_task(
+                self.tts.speak_stream(strip_markdown(_feed()))
+            )
+
+        try:
+            async for token in self.domain.generate(self.message):
+                if self._cancelled:
+                    return
+                if isinstance(token, (RouteEvent, ToolEvent)):
+                    status = format_tool_status(token)
+                    if status is not None:
+                        self.tool_status.emit(status)
+                    continue
+                self.token_received.emit(token)
+                if tts_queue is not None:
+                    await tts_queue.put(token)
+        finally:
+            if tts_queue is not None:
+                await tts_queue.put(None)  # sentinel
+                if self._cancelled and self.tts is not None:
+                    # User hit Stop: kill the speaker mid-sentence.
+                    try:
+                        await self.tts.stop()
+                    except Exception:
+                        pass
+                if tts_task is not None:
+                    try:
+                        await tts_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
         self.finished.emit()

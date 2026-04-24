@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -8,10 +7,10 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 
 from src.shared.config import Config
+from src.shared.paths import DATA_DIR
 
 _DIR = Path(__file__).parent
-_CONVO_DIR = os.path.expanduser("~/.andrewcli/data")
-_CONVO_FILE = os.path.join(_CONVO_DIR, "conversation.md")
+_CONVO_FILE = DATA_DIR / "conversation.md"
 
 
 class ChatPanel(QWidget):
@@ -19,6 +18,10 @@ class ChatPanel(QWidget):
     stop_requested = pyqtSignal()
     clear_requested = pyqtSignal()
     domain_switch = pyqtSignal()
+    # Emits True when the user turns the mic ON, False when OFF. Only
+    # fires when voice mode is enabled on the app (tray ctor with
+    # --voice); otherwise the button is hidden and this is inert.
+    voice_toggle = pyqtSignal(bool)
 
     def __init__(self):
         super().__init__()
@@ -70,6 +73,22 @@ class ChatPanel(QWidget):
         self._label.setObjectName("PanelLabel")
         header.addWidget(self._label)
         header.addStretch()
+
+        # Mic toggle. Hidden until ``set_voice_enabled(True)`` flips it
+        # on, so the header stays clean for users who don't opt into
+        # voice mode. Plain ASCII text + a colored dot rather than a
+        # mic emoji: the emoji renders as a zero-width box on Linux
+        # boxes without a color-emoji font (noto-color-emoji), which
+        # is why the button "isn't there" on a fresh install.
+        self._voice_on = True
+        self._mic_btn = QPushButton("● Voice")
+        self._mic_btn.setObjectName("MicBtn")
+        self._mic_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._mic_btn.setToolTip("Voice listening ON — click to pause")
+        self._mic_btn.setProperty("voiceOn", True)
+        self._mic_btn.clicked.connect(self._on_mic_toggle)
+        self._mic_btn.hide()
+        header.addWidget(self._mic_btn)
 
         self._stop_btn = QPushButton("Stop")
         self._stop_btn.setObjectName("StopBtn")
@@ -231,6 +250,31 @@ class ChatPanel(QWidget):
         self._entry.setPlaceholderText("Reply...")
         self._entry.setFocus()
 
+    def set_voice_enabled(self, enabled: bool) -> None:
+        """Show/hide the mic toggle in the header.
+
+        Called once at startup by ``AndrewTrayApp`` when ``--voice`` is
+        active. Off by default so the header stays clean in the common
+        typed-only setup.
+        """
+        self._mic_btn.setVisible(enabled)
+
+    def _on_mic_toggle(self):
+        """Flip the mic on/off and tell the app via ``voice_toggle``."""
+        self._voice_on = not self._voice_on
+        if self._voice_on:
+            self._mic_btn.setText("● Voice")
+            self._mic_btn.setToolTip("Voice listening ON — click to pause")
+        else:
+            self._mic_btn.setText("○ Voice")
+            self._mic_btn.setToolTip("Voice listening OFF — click to resume")
+        # Dynamic property drives the stylesheet color (green vs grey).
+        # Qt needs an explicit style re-polish to pick up the change.
+        self._mic_btn.setProperty("voiceOn", self._voice_on)
+        self._mic_btn.style().unpolish(self._mic_btn)
+        self._mic_btn.style().polish(self._mic_btn)
+        self.voice_toggle.emit(self._voice_on)
+
     def _on_clear(self):
         self._response_md = ""
         self._browser.setPlainText("")
@@ -243,6 +287,18 @@ class ChatPanel(QWidget):
         if not text:
             return
         self._entry.clear()
+        self.show_user_message(text)
+        self.submitted.emit(text)
+
+    def show_user_message(self, text: str):
+        """Prepare the panel for a new user message from any source.
+
+        Appends the user's line to the conversation, flips the panel
+        into streaming state, and swaps the status spinner to
+        "Thinking...". Callable from outside the panel (e.g. the
+        tray's voice-transcript handler) so voice-submitted messages
+        produce the same visual timeline as typed ones.
+        """
         if self._response_md:
             self._response_md += "\n\n---\n\n"
         self._response_md += f"**You:** {text}\n\n**Andrew:** "
@@ -254,7 +310,6 @@ class ChatPanel(QWidget):
         self._start_spinner("Thinking...")
         self._stop_btn.show()
         self._set_expanded()
-        self.submitted.emit(text)
 
     # -- slots for StreamWorker signals ---------------------------------------
 
@@ -297,14 +352,24 @@ class ChatPanel(QWidget):
             self._entry.setFocus()
 
     def on_error(self, text: str):
-        self._response_md = f"**Error:** {text}"
+        # Append the error to the existing conversation instead of wiping
+        # it. The old behavior persisted a bare "**Error:** ..." markdown
+        # file to disk on the next turn, destroying history.
+        if self._response_md and not self._response_md.endswith("\n"):
+            self._response_md += "\n\n"
+        self._response_md += f"**Error:** {text}\n"
         self._streaming = False
         self._stop_spinner()
+        self._render_timer.stop()
+        self._render_cursor_pos = len(self._response_md)
         self._stop_btn.hide()
         self._label.setText("Error")
         if self.isVisible():
             self._browser.setMarkdown(self._response_md)
+            sb = self._browser.verticalScrollBar()
+            sb.setValue(sb.maximum())
             self._entry.setFocus()
+        self._save_conversation()
 
     def start_event_response(self, event_name: str):
         """Prepare the panel to receive a streamed agent response from an event."""
@@ -344,15 +409,13 @@ class ChatPanel(QWidget):
     @staticmethod
     def _load_conversation():
         try:
-            with open(_CONVO_FILE, "r") as f:
-                return f.read()
+            return _CONVO_FILE.read_text()
         except FileNotFoundError:
             return ""
 
     def _save_conversation(self):
-        os.makedirs(_CONVO_DIR, exist_ok=True)
-        with open(_CONVO_FILE, "w") as f:
-            f.write(self._response_md)
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        _CONVO_FILE.write_text(self._response_md)
 
     def set_domain_name(self, name: str):
         self._domain_btn.setText(name)

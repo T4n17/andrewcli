@@ -19,10 +19,39 @@ class RouteEvent:
         self.tool_names = tool_names
 
 
+def format_tool_status(event) -> str | None:
+    """Format a RouteEvent/ToolEvent into a user-visible status string.
+
+    Returns None when the event should not change the status line.
+    Shared between the CLI renderer, the tray panel, and the server so
+    every frontend displays identical routing/tool messages.
+    """
+    if isinstance(event, RouteEvent):
+        if event.tool_names:
+            return f"Loading: {', '.join(event.tool_names)}"
+        return None
+    if isinstance(event, ToolEvent):
+        if event.tool_name:
+            first_val = (
+                str(next(iter(event.tool_args.values()), ""))
+                if event.tool_args else ""
+            )
+            if len(first_val) > 60:
+                first_val = first_val[:57] + "..."
+            detail = f": {first_val}" if first_val else ""
+            return f"Running {event.tool_name}{detail}"
+        return "Thinking..."
+    return None
+
+
 class LLM:
     def __init__(self):
         self.api_base_url = os.getenv("API_BASE_URL", "http://localhost:8080/v1")
         self.model = os.getenv("MODEL", "qwen3.5:9B")
+        # Memory summarization is background work that doesn't need the
+        # same capacity as the main chat model. Point SUMMARY_MODEL at a
+        # smaller model on the same server to cut background load.
+        self.summary_model = os.getenv("SUMMARY_MODEL", self.model)
         self.client = openai.AsyncOpenAI(base_url=self.api_base_url)
         self.memory = Memory()
 
@@ -38,6 +67,7 @@ class LLM:
         all_schemas = (skills_schemas or []) + (tool_schemas or []) or None
         all_callables = (skills or []) + (tools or [])
 
+        last_content = ""
         for _ in range(max_rounds):
             kwargs = {"model": self.model, "messages": self.memory.get(), "stream": True}
             if all_schemas:
@@ -71,9 +101,12 @@ class LLM:
                             if tc_delta.function.arguments:
                                 tool_calls_accum[idx]["arguments"] += tc_delta.function.arguments
 
+            if content:
+                last_content = content
+
             if not tool_calls_accum:
                 self.memory.add({"role": "assistant", "content": content})
-                await self.memory.summarize_turn(self.client, self.model)
+                await self.memory.summarize_turn(self.client, self.summary_model)
                 return
 
             self.memory.add({
@@ -99,7 +132,12 @@ class LLM:
                     args = {}
                 yield ToolEvent(tc["name"], args)
                 await asyncio.sleep(2)
-                result = self._execute_tool_call_from_dict(tc, all_callables)
+                # Tools can do blocking I/O (subprocess, HTTP, scrapers).
+                # Run them in a worker thread so the event loop keeps
+                # scheduling the spinner, SSE heartbeats, and other events.
+                result = await asyncio.to_thread(
+                    self._execute_tool_call_from_dict, tc, all_callables,
+                )
                 self.memory.add({
                     "role": "tool",
                     "tool_call_id": tc["id"],
@@ -108,8 +146,14 @@ class LLM:
 
             yield ToolEvent()
 
-        self.memory.add({"role": "assistant", "content": content})
-        await self.memory.summarize_turn(self.client, self.model)
+        # Fell out of the max_rounds loop without a final text response.
+        # Persist the last non-empty content we actually produced instead
+        # of the (possibly empty) content from the final tool-only round.
+        self.memory.add({
+            "role": "assistant",
+            "content": last_content or "(tool loop exceeded max rounds)",
+        })
+        await self.memory.summarize_turn(self.client, self.summary_model)
 
     def _execute_tool_call_from_dict(self, tool_call: dict, tools: list) -> str:
         func_name = tool_call["name"]

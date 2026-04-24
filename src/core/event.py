@@ -1,6 +1,9 @@
 import asyncio
+import logging
 from abc import ABC, abstractmethod
 from typing import Callable, Awaitable
+
+log = logging.getLogger(__name__)
 
 
 class Event(ABC):
@@ -78,6 +81,6 @@ class EventBus:
                     await self.dispatch(event)
             except asyncio.CancelledError:
                 break
-            except Exception as exc:
-                print(f"[EventBus] error in event '{event.name}': {exc}")
+            except Exception:
+                log.exception("error in event '%s'", event.name)
                 await asyncio.sleep(1)

@@ -6,4 +6,49 @@ tray_width_expanded: 500 #900
 tray_height_expanded: 1000 #600
 tray_platform: "xcb"
 tray_position: "bottom-right"
-tray_opacity: "90%"
+tray_opacity: "80%"
+
+# Routing: "embed" (fast, local embedding classifier) or "llm" (uses MODEL)
+router_backend: "llm"
+# Cosine threshold above which a tool/skill is considered relevant.
+# Lower = more tools selected, higher = stricter matching.
+# Tuned for paraphrase-multilingual-mpnet-base-v2:
+#   chat/greetings score 0.25-0.40, real queries score 0.50-0.95
+router_threshold: 0.40
+
+# --- Voice (optional) --------------------------------------------------------
+# Set enabled: true once you've installed the voice extras
+# (faster-whisper, openwakeword, piper-tts, sounddevice).
+# Models download automatically to ~/.cache/ on first use.
+voice:
+  enabled: true
+  # Wake word. Accepts:
+  #   - a custom model bundled in src/voice/<name>.onnx (e.g. "hey_andrew",
+  #     trained via openwakeword + shipped with this repo)
+  #   - an openwakeword built-in: hey_jarvis, alexa, hey_mycroft, hey_rhasspy
+  #   - an absolute path to a .tflite or .onnx file
+  wake_word: "hey_andrew"
+  wake_threshold: 0.30
+  # faster-whisper size: tiny / base / small / medium / large-v3
+  stt_model: "small"
+  # STT language: "auto" or ISO code (e.g. "en", "it")
+  stt_language: "it"
+  # TTS engine: "piper" (fast, local, robotic) or "edge" (Microsoft
+  # Azure Neural TTS via the free Edge endpoint, excellent quality,
+  # needs internet, ~500ms first-audio latency).
+  tts_engine: "edge"
+  # Voice name format depends on the engine:
+  #   piper: <lang>_<region>-<speaker>-<quality>
+  #          e.g. en_US-amy-medium, it_IT-riccardo-x_low
+  #   edge:  <lang>-<region>-<name>Neural
+  #          e.g. it-IT-IsabellaNeural, it-IT-DiegoNeural,
+  #               en-US-AvaNeural, de-DE-KatjaNeural
+  #          full list: `edge-tts --list-voices`
+  tts_voice: "it-IT-IsabellaNeural"
+  tts_speed: 1.0
+  # Optional sounddevice device ids; leave null for system defaults.
+  # On Linux with PipeWire/PulseAudio, "pulse" routes to the host's
+  # active source/sink (follows your system volume panel) and handles
+  # resampling transparently - far more robust than raw ALSA hw: devices.
+  input_device: "pulse"
+  output_device: "pulse"

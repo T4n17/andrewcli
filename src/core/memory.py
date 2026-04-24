@@ -1,9 +1,19 @@
 import asyncio
 import json
-import os
+import logging
+import time
 
-MEMORY_DIR = os.path.expanduser("~/.andrewcli/data")
-MEMORY_FILE = os.path.join(MEMORY_DIR, "memory.json")
+from src.shared.paths import DATA_DIR
+
+log = logging.getLogger(__name__)
+
+MEMORY_FILE = DATA_DIR / "memory.json"
+
+# Skip the LLM merge call when the turn produced less than this much
+# combined text. Short exchanges (greetings, one-word answers) aren't
+# worth a full summarization request - we just append them verbatim.
+# ~200 chars ≈ ~40 tokens, which matches the "short turn" heuristic.
+MIN_SUMMARY_CHARS = 200
 
 MERGE_SYSTEM_PROMPT = (
     "You are a memory summarizer. Merge the existing summary and new conversation "
@@ -51,6 +61,16 @@ class Memory:
 
         self._trim_messages()
 
+        # Bonus optimization: for short turns (greetings, one-liners,
+        # quick confirmations) the LLM merge is overkill. Append the
+        # excerpt to the summary verbatim with a rolling window.
+        if len(excerpt) < MIN_SUMMARY_CHARS:
+            combined = f"{self.summary}\n{excerpt}" if self.summary else excerpt
+            self.summary = combined[-2000:]
+            self._save_summary()
+            log.debug("summarize_turn: short turn (%d chars), merged inline", len(excerpt))
+            return
+
         if not self.summary:
             self.summary = excerpt[:2000]
             self._save_summary()
@@ -60,8 +80,13 @@ class Memory:
             )
 
     async def _background_merge(self, client, model: str, excerpt: str):
+        t0 = time.monotonic()
         self.summary = await self._merge_summary(client, model, self.summary, excerpt)
         self._save_summary()
+        log.debug(
+            "background summary merge (model=%s) took %.2fs",
+            model, time.monotonic() - t0,
+        )
 
     def _extract_excerpt(self, max_chars: int) -> str:
         lines = []
@@ -113,18 +138,18 @@ class Memory:
 
     def _load_summary(self) -> str:
         try:
-            with open(MEMORY_FILE, "r") as f:
-                data = json.load(f)
-                if data.get("version") == 2:
-                    return data.get("summary", "")
+            data = json.loads(MEMORY_FILE.read_text())
+            if data.get("version") == 2:
+                return data.get("summary", "")
         except (FileNotFoundError, json.JSONDecodeError):
             pass
         return ""
 
     def _save_summary(self):
-        os.makedirs(MEMORY_DIR, exist_ok=True)
-        with open(MEMORY_FILE, "w") as f:
-            json.dump({"version": 2, "summary": self.summary}, f, indent=2)
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        MEMORY_FILE.write_text(
+            json.dumps({"version": 2, "summary": self.summary}, indent=2)
+        )
 
     def rollback_turn(self):
         """Discard messages from a stopped turn.

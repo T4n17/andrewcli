@@ -1,5 +1,0 @@
-openai
-pyyaml
-fastapi
-uvicorn
-PyQt6

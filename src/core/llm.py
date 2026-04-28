@@ -67,93 +67,129 @@ class LLM:
         all_schemas = (skills_schemas or []) + (tool_schemas or []) or None
         all_callables = (skills or []) + (tools or [])
 
-        last_content = ""
-        for _ in range(max_rounds):
-            kwargs = {"model": self.model, "messages": self.memory.get(), "stream": True}
-            if all_schemas:
-                kwargs["tools"] = all_schemas
-            stream = await self.client.chat.completions.create(**kwargs)
+        # Everything below runs inside a try/finally so the turn-scoped
+        # active-skill blocks in Memory are always cleared at turn end,
+        # including on exception, early return, and generator aclose()
+        # (which fires a GeneratorExit inside the `async for` yield).
+        # Without this a skill activated mid-turn would leak into the
+        # system prompt of the *next* user turn and bias its routing.
+        try:
+            last_content = ""
+            for _ in range(max_rounds):
+                kwargs = {"model": self.model, "messages": self.memory.get(), "stream": True}
+                if all_schemas:
+                    kwargs["tools"] = all_schemas
+                stream = await self.client.chat.completions.create(**kwargs)
 
-            content = ""
-            tool_calls_accum = {}
+                content = ""
+                tool_calls_accum = {}
 
-            async for chunk in stream:
-                delta = chunk.choices[0].delta
+                async for chunk in stream:
+                    delta = chunk.choices[0].delta
 
-                if delta.content:
-                    content += delta.content
-                    yield delta.content
+                    if delta.content:
+                        content += delta.content
+                        yield delta.content
 
-                if delta.tool_calls:
-                    for tc_delta in delta.tool_calls:
-                        idx = tc_delta.index
-                        if idx not in tool_calls_accum:
-                            tool_calls_accum[idx] = {
-                                "id": tc_delta.id or "",
-                                "name": "",
-                                "arguments": "",
-                            }
-                        if tc_delta.id:
-                            tool_calls_accum[idx]["id"] = tc_delta.id
-                        if tc_delta.function:
-                            if tc_delta.function.name:
-                                tool_calls_accum[idx]["name"] += tc_delta.function.name
-                            if tc_delta.function.arguments:
-                                tool_calls_accum[idx]["arguments"] += tc_delta.function.arguments
+                    if delta.tool_calls:
+                        for tc_delta in delta.tool_calls:
+                            idx = tc_delta.index
+                            if idx not in tool_calls_accum:
+                                tool_calls_accum[idx] = {
+                                    "id": tc_delta.id or "",
+                                    "name": "",
+                                    "arguments": "",
+                                }
+                            if tc_delta.id:
+                                tool_calls_accum[idx]["id"] = tc_delta.id
+                            if tc_delta.function:
+                                if tc_delta.function.name:
+                                    tool_calls_accum[idx]["name"] += tc_delta.function.name
+                                if tc_delta.function.arguments:
+                                    tool_calls_accum[idx]["arguments"] += tc_delta.function.arguments
 
-            if content:
-                last_content = content
+                if content:
+                    last_content = content
 
-            if not tool_calls_accum:
-                self.memory.add({"role": "assistant", "content": content})
-                await self.memory.summarize_turn(self.client, self.summary_model)
-                return
+                if not tool_calls_accum:
+                    self.memory.add({"role": "assistant", "content": content})
+                    await self.memory.summarize_turn(self.client, self.summary_model)
+                    return
 
-            self.memory.add({
-                "role": "assistant",
-                "content": content,
-                "tool_calls": [
-                    {
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {
-                            "name": tc["name"],
-                            "arguments": tc["arguments"],
-                        },
-                    }
-                    for tc in tool_calls_accum.values()
-                ],
-            })
-
-            for tc in tool_calls_accum.values():
-                try:
-                    args = json.loads(tc["arguments"]) if tc.get("arguments") else {}
-                except json.JSONDecodeError:
-                    args = {}
-                yield ToolEvent(tc["name"], args)
-                await asyncio.sleep(2)
-                # Tools can do blocking I/O (subprocess, HTTP, scrapers).
-                # Run them in a worker thread so the event loop keeps
-                # scheduling the spinner, SSE heartbeats, and other events.
-                result = await asyncio.to_thread(
-                    self._execute_tool_call_from_dict, tc, all_callables,
-                )
                 self.memory.add({
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": str(result),
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": [
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc["name"],
+                                "arguments": tc["arguments"],
+                            },
+                        }
+                        for tc in tool_calls_accum.values()
+                    ],
                 })
 
-            yield ToolEvent()
+                for tc in tool_calls_accum.values():
+                    try:
+                        args = json.loads(tc["arguments"]) if tc.get("arguments") else {}
+                    except json.JSONDecodeError:
+                        args = {}
+                    yield ToolEvent(tc["name"], args)
+                    await asyncio.sleep(2)
 
-        # Fell out of the max_rounds loop without a final text response.
-        # Persist the last non-empty content we actually produced instead
-        # of the (possibly empty) content from the final tool-only round.
-        self.memory.add({
-            "role": "assistant",
-            "content": last_content or "(tool loop exceeded max rounds)",
-        })
-        await self.memory.summarize_turn(self.client, self.summary_model)
+                    # Skills deliver scripted instructions rather than real
+                    # side effects, so we promote their body into the system
+                    # prompt (higher authority than a tool response) and
+                    # reply to the tool_call with a short acknowledgement.
+                    # This makes the model treat the steps as binding
+                    # system-level instructions instead of optional
+                    # reference material buried in a tool response.
+                    callable_obj = next(
+                        (c for c in all_callables if c.name == tc["name"]),
+                        None,
+                    )
+                    if isinstance(callable_obj, Skill):
+                        instructions = callable_obj.run(**args)
+                        self.memory.add_active_skill(callable_obj.name, instructions)
+                        result = (
+                            f"Skill '{callable_obj.name}' activated. Follow the "
+                            f"<skill:{callable_obj.name}> block in your system "
+                            "instructions: execute each step in order by "
+                            "calling the appropriate tools."
+                        )
+                    else:
+                        # Tools can do blocking I/O (subprocess, HTTP, scrapers).
+                        # Run them in a worker thread so the event loop keeps
+                        # scheduling the spinner, SSE heartbeats, and other events.
+                        result = await asyncio.to_thread(
+                            self._execute_tool_call_from_dict, tc, all_callables,
+                        )
+                    self.memory.add({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": str(result),
+                    })
+
+                yield ToolEvent()
+
+            # Fell out of the max_rounds loop without a final text response.
+            # Persist the last non-empty content we actually produced instead
+            # of the (possibly empty) content from the final tool-only round.
+            self.memory.add({
+                "role": "assistant",
+                "content": last_content or "(tool loop exceeded max rounds)",
+            })
+            await self.memory.summarize_turn(self.client, self.summary_model)
+        finally:
+            # Turn scope ends here for every exit path (normal return,
+            # max_rounds fall-through, exception, or async generator
+            # aclose() from a cancelled stream). Drop all active-skill
+            # blocks so they don't leak into the next user turn's
+            # system prompt.
+            self.memory.clear_active_skills()
 
     def _execute_tool_call_from_dict(self, tool_call: dict, tools: list) -> str:
         func_name = tool_call["name"]

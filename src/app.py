@@ -1,4 +1,5 @@
 from src.core.registry import available_domains, load_domain
+from src.core.events_registry import parse_slash_command, list_commands
 from src.shared.config import Config
 from src.ui.renderer import StreamRenderer
 import asyncio
@@ -261,6 +262,39 @@ class AndrewCLI:
             prompt = f"[{self.domain_name}] Ask: "
             user_input = await self._get_next_prompt(prompt)
             if not user_input.strip():
+                continue
+            if user_input.startswith("/"):
+                cmd = user_input.strip()
+                bus = self.domain.event_bus
+                if cmd == "/events":
+                    sys.stdout.write(list_commands(bus.running()) + "\n")
+                    sys.stdout.flush()
+                    continue
+                if cmd.startswith("/stop"):
+                    parts = cmd.split(None, 1)
+                    if len(parts) == 1:
+                        running = bus.running()
+                        msg = ("Running: " + ", ".join(running)) if running else "No events running."
+                        sys.stdout.write(msg + "\n")
+                    elif bus.remove(parts[1]):
+                        sys.stdout.write(f"\033[33m✓ Event '{parts[1]}' stopped\033[0m\n")
+                    else:
+                        sys.stdout.write(f"\033[31mNo running event named '{parts[1]}'\033[0m\n")
+                    sys.stdout.flush()
+                    continue
+                event = parse_slash_command(user_input)
+                if event is not None:
+                    bus.add(event)
+                    sys.stdout.write(
+                        f"\033[32m✓ Event '{event.name}' started\033[0m\n"
+                    )
+                    sys.stdout.flush()
+                    continue
+                sys.stdout.write(
+                    f"\033[31mUnknown command: {user_input}\033[0m\n"
+                    + list_commands(bus.running()) + "\n"
+                )
+                sys.stdout.flush()
                 continue
             await self._stream_response(user_input)
 

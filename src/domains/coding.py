@@ -1,6 +1,7 @@
 from src.core.domain import Domain
 from src.tools.common import WriteFile, ReadFile, ExecuteCommand, GetCurrentDate
 
+
 class CodingDomain(Domain):
     routing_enabled: bool = False
     system_prompt: str = """You are a helpful coding assistant.

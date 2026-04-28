@@ -42,7 +42,7 @@ class Config:
         # constructed, so leaving voice disabled costs nothing.
         voice = config.get("voice", {}) or {}
         self.voice_enabled = bool(voice.get("enabled", False))
-        self.voice_wake_word = voice.get("wake_word", "hey_jarvis")
+        self.voice_wake_word = voice.get("wake_word", "hey_andrew")
         self.voice_wake_threshold = float(voice.get("wake_threshold", 0.5))
         self.voice_stt_model = voice.get("stt_model", "small")
         self.voice_stt_language = voice.get("stt_language", "auto")

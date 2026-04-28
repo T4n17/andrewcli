@@ -30,12 +30,34 @@ class Memory:
         self.last_exchange = ""
         self._trimmed = False
         self._merge_task = None
+        # Skills that were activated during the current turn. Each entry
+        # is (name, instructions). Rendered into the system message by
+        # :meth:`get` under a ``<skill:...>`` tag so the model sees the
+        # body at system-level priority instead of as a tool response.
+        # Cleared by :meth:`clear_active_skills` at turn end.
+        self._active_skills: list[tuple[str, str]] = []
 
     def add(self, message: dict):
         if message.get("role") == "system":
             self.system_prompt = message["content"]
         else:
             self.messages.append(message)
+
+    def add_active_skill(self, name: str, instructions: str) -> None:
+        """Promote a skill's body into the system prompt for this turn.
+
+        Called from the LLM loop the moment a skill tool is invoked.
+        Replaces any existing entry with the same name so re-invocations
+        in the same turn don't stack duplicate blocks.
+        """
+        self._active_skills = [
+            (n, i) for (n, i) in self._active_skills if n != name
+        ]
+        self._active_skills.append((name, instructions))
+
+    def clear_active_skills(self) -> None:
+        """Drop all turn-scoped skill annotations. Called at turn end."""
+        self._active_skills = []
 
     def get(self) -> list:
         result = []
@@ -46,6 +68,20 @@ class Memory:
             sys_content += (
                 "\n\n<context>Earlier conversation was summarized in the "
                 "memory blocks above. Full history has been cleared.</context>"
+            )
+        # Active-skill blocks go last inside the system message so they
+        # sit closest to the user's request in the context window -
+        # models attend more strongly to later parts of long system
+        # prompts. Each skill is wrapped in a named tag so the model
+        # can distinguish concurrent skills if more than one is active.
+        for name, instructions in self._active_skills:
+            sys_content += (
+                f"\n\n<skill:{name}>\n"
+                "The user's request has triggered this skill. Execute the "
+                "steps below verbatim by calling the appropriate tools. "
+                "Do not summarize, skip, or paraphrase any step.\n\n"
+                f"{instructions}\n"
+                f"</skill:{name}>"
             )
         result.append({"role": "system", "content": sys_content})
         result.extend(self.messages)
@@ -169,10 +205,12 @@ class Memory:
                 parts.append(f"assistant (partial, stopped by user): {last_assistant}")
             self.last_exchange = "\n".join(parts)
         self.messages = []
+        self._active_skills = []
 
     def clear(self):
         self.messages = []
         self._trimmed = False
+        self._active_skills = []
 
     def __str__(self):
         return str(self.get())

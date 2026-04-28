@@ -5,6 +5,7 @@ from PyQt6.QtWidgets import (
     QTextBrowser, QLineEdit, QLabel, QPushButton,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QFont
 
 from src.shared.config import Config
 from src.shared.paths import DATA_DIR
@@ -22,18 +23,31 @@ class ChatPanel(QWidget):
     # fires when voice mode is enabled on the app (tray ctor with
     # --voice); otherwise the button is hidden and this is inert.
     voice_toggle = pyqtSignal(bool)
+    # Emitted by ``_hide()`` when the panel was constructed with
+    # ``embedded=True``. Lets a host widget decide what "hide" means
+    # in its layout (collapse a slot, swap pages, ignore, ...) instead
+    # of having ChatPanel call ``self.hide()`` on a child widget that
+    # the host expects to manage itself.
+    hide_requested = pyqtSignal()
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, parent=None, *, embedded: bool = False):
+        super().__init__(parent)
         self._config = Config()
         self._md_css = (_DIR / "md.css").read_text()
+        # When True, ChatPanel behaves as a child widget: no frameless
+        # window flags, no top-level opacity, no screen-edge
+        # positioning, and ``_hide()`` emits ``hide_requested`` instead
+        # of calling ``self.hide()``. Default False keeps the
+        # standalone tray's behavior byte-for-byte identical.
+        self._embedded = embedded
 
         self.setObjectName("ChatPanel")
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-        )
-        self.setWindowOpacity(self._config.tray_opacity)
+        if not embedded:
+            self.setWindowFlags(
+                Qt.WindowType.FramelessWindowHint
+                | Qt.WindowType.WindowStaysOnTopHint
+            )
+            self.setWindowOpacity(self._config.tray_opacity)
         self._expanded = False
         self._streaming = False
         self._response_md = ""
@@ -127,6 +141,21 @@ class ChatPanel(QWidget):
         self._browser = QTextBrowser()
         self._browser.setOpenExternalLinks(True)
         self._browser.document().setDefaultStyleSheet(self._md_css)
+        # The streaming render path (``cursor.insertText``) uses the
+        # document's default font, not the CSS in md.css - so emoji
+        # in mid-stream tokens render as tofu boxes unless we attach
+        # the same fallback list here too. ``setMarkdown`` (called on
+        # stream-done) goes through CSS and picks up md.css's family
+        # list, so this covers the streaming half of the pipeline.
+        browser_font = self._browser.font()
+        browser_font.setFamilies([
+            browser_font.family(),
+            "Noto Color Emoji",
+            "Noto Emoji",
+            "Symbola",
+            "sans-serif",
+        ])
+        self._browser.document().setDefaultFont(browser_font)
         self._browser.hide()
         layout.addWidget(self._browser)
 
@@ -188,6 +217,11 @@ class ChatPanel(QWidget):
         self._position()
 
     def _position(self):
+        # Embedded mode: the host widget owns layout/positioning, so
+        # screen-relative placement would either fight the host's
+        # geometry or move the host's whole window. Bail out.
+        if self._embedded:
+            return
         margin = 12
         screen = QApplication.primaryScreen().geometry()
         sw, sh = screen.width(), screen.height()
@@ -231,6 +265,14 @@ class ChatPanel(QWidget):
             sb.setValue(sb.maximum())
 
     def _hide(self):
+        # Embedded mode: defer the hide policy to the host widget.
+        # Calling ``self.hide()`` on a child widget often surprises the
+        # host's layout (sudden gap, wrong focus) - emitting a signal
+        # lets the host swap pages, collapse a slot, or ignore the
+        # request entirely.
+        if self._embedded:
+            self.hide_requested.emit()
+            return
         self.hide()
 
     # -- user actions ---------------------------------------------------------

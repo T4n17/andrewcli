@@ -1,0 +1,10 @@
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+.env
+andrewcli.egg-info
+__pycache__

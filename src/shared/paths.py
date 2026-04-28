@@ -10,4 +10,5 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_FILE = PROJECT_ROOT / "config.yaml"
 SKILLS_DIR = PROJECT_ROOT / "src" / "skills" / "skills_files"
 DOMAINS_DIR = PROJECT_ROOT / "src" / "domains"
+EVENTS_DIR  = PROJECT_ROOT / "src" / "events"
 DATA_DIR = Path.home() / ".andrewcli" / "data"

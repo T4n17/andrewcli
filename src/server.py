@@ -9,6 +9,7 @@ import uuid
 
 from src.core.llm import ToolEvent, RouteEvent
 from src.core.registry import load_domain
+from src.core.events_registry import parse_slash_command, list_commands
 from src.shared.config import Config
 
 app = FastAPI(title="AndrewCLI API")
@@ -46,8 +47,62 @@ class ChatResponse(BaseModel):
     tool_calls: list
 
 
+@app.get("/events")
+async def get_events():
+    """List all available slash-command events."""
+    from src.core.events_registry import available_events
+    import inspect
+    registry = available_events()
+    result = []
+    for name, cls in sorted(registry.items()):
+        sig = inspect.signature(cls.__init__)
+        params = [n for n in sig.parameters if n != "self"]
+        result.append({"name": name, "args": params})
+    return {"events": result, "usage": "/name [arg1] [arg2] ..."}
+
+
+async def _run_slash_command(req: ChatRequest) -> ChatResponse:
+    """Handle a /name [args] message: fire the event once via generate_event."""
+    text = req.message.strip()
+    domain_name = _resolve_domain_name(req.domain)
+    if text == "/events":
+        return ChatResponse(domain=domain_name, response=list_commands(), tool_calls=[])
+    if text.startswith("/stop"):
+        return ChatResponse(
+            domain=domain_name,
+            response="Event stopping is stateful and only supported in CLI/tray mode.",
+            tool_calls=[],
+        )
+    event = parse_slash_command(text)
+    if event is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown slash command. {list_commands()}",
+        )
+    if not event.message:
+        return ChatResponse(
+            domain=_resolve_domain_name(req.domain),
+            response=f"Event '{event.name}' registered (no agent message).",
+            tool_calls=[],
+        )
+    domain, domain_name = _new_domain(req.domain)
+    response_text = ""
+    tool_calls = []
+    async for token in domain.generate_event(event.message):
+        if isinstance(token, RouteEvent):
+            continue
+        if isinstance(token, ToolEvent):
+            if token.tool_name:
+                tool_calls.append({"tool": token.tool_name, "args": token.tool_args or {}})
+            continue
+        response_text += token
+    return ChatResponse(domain=domain_name, response=response_text, tool_calls=tool_calls)
+
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
+    if req.message.startswith("/"):
+        return await _run_slash_command(req)
     try:
         domain, domain_name = _new_domain(req.domain)
     except ValueError as e:
@@ -79,6 +134,13 @@ async def chat(req: ChatRequest):
 
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
+    if req.message.startswith("/"):
+        result = await _run_slash_command(req)
+        async def _once():
+            yield f"data: {json.dumps({'type': 'session', 'domain': result.domain})}\n\n"
+            yield f"data: {json.dumps({'type': 'token', 'content': result.response})}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        return StreamingResponse(_once(), media_type="text/event-stream")
     try:
         domain, domain_name = _new_domain(req.domain)
     except ValueError as e:

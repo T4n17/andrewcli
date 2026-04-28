@@ -26,16 +26,18 @@ AndrewCLI/
     │   └── paths.py                # Centralized filesystem paths (PROJECT_ROOT, DATA_DIR, …)
     ├── core/
     │   ├── domain.py               # Base Domain class (async generator, event bus, busy_lock)
-    │   ├── event.py                # Event ABC + EventBus
+    │   ├── event.py                # Event ABC + EventBus (add, remove, running, stop)
+    │   ├── events_registry.py      # Event auto-discovery + /name [args] slash-command parsing
     │   ├── llm.py                  # Async LLM client with streaming + tool-calling loop
     │   ├── memory.py               # Rolling memory with background summarization
     │   ├── registry.py             # Domain discovery and dynamic loading
     │   ├── router.py               # ToolRouter (LLM) + EmbeddingRouter (fastembed)
     │   ├── skill.py                # Base Skill class (markdown-defined tools)
     │   └── tool.py                 # Base Tool class — auto-generates OpenAI schemas from type hints
-    ├── events/                     # Event definitions (auto-loaded by domain)
+    ├── events/                     # Event definitions — auto-discovered, activated via /name
     │   ├── timer.py                # TimerEvent — fires on a fixed interval
-    │   └── file.py                 # FileEvent — fires when a watched file is modified
+    │   ├── file.py                 # FileEvent — fires when a watched file is modified
+    │   └── project.py              # ProjectEvent — drives the agent through a multi-step project
     ├── ui/                         # CLI rendering layer
     │   ├── animations.py           # Spinner (async, dynamic status)
     │   ├── filter.py               # ThinkFilter — parses <think> tags for reasoning display
@@ -150,7 +152,7 @@ tools: [tool_name_1, tool_name_2]
 
 The optional `tools:` field lists tools the skill requires — they are injected into the generation call even if the router didn't select them.
 
-When invoked, the skill returns its instructions with a `[SKILL INSTRUCTIONS]` prefix that directs the LLM to execute each step via tools rather than summarizing them.
+When the LLM invokes a skill, its body is **promoted into the system prompt** as a turn-scoped `<skill:NAME>...</skill:NAME>` block (see `Memory.add_active_skill` and `Memory.get` in `src/core/memory.py`). The tool-call response is just a short acknowledgement pointing the model at the new system instructions. This puts skill steps at the same authority tier as the domain's base system prompt — far stickier than embedding them in a `role: tool` message, where local models tend to summarize or skip steps. The block is cleared in a `try/finally` at turn end (`LLM.generate` in `src/core/llm.py`) so it never leaks into the next turn's routing or context.
 
 ### Events
 
@@ -170,16 +172,66 @@ If the event sets a `message` string, the `EventBus` automatically dispatches it
 
 **Built-in events** (`src/events/`):
 
-| Event | Description |
-|-------|-------------|
-| `TimerEvent` | Fires every N seconds (configurable interval) |
-| `FileEvent` | Fires when a watched file's modification time changes |
+| Event | Slash command | Description |
+|-------|---------------|-------------|
+| `TimerEvent` | `/timer [interval]` | Fires every N seconds |
+| `FileEvent` | `/file [path] [poll_interval] [message]` | Fires when a watched file is modified |
+| `ProjectEvent` | `/project [goal] [state_file]` | Drives the agent through a multi-step project: plans on the first invocation, executes one task per invocation, stops when all tasks are marked done in `state_file` |
 
 **Notification** — when an event fires, both surfaces are notified:
 - **CLI**: a colored banner (`◆ Event [name]`) is printed, followed by the agent's streamed response.
 - **Tray**: a system tray balloon message appears and the panel opens to show the response.
 
 Event responses are rendered exactly like user-initiated responses (routing, spinner, tool calls) but use an isolated LLM instance so the conversation memory is never polluted.
+
+#### Slash commands
+
+Events are activated at runtime via slash commands — no domain restart required. The same syntax works in the CLI input prompt, the tray panel input field, and the server's `/chat` endpoint.
+
+```
+/events                              — list available events and which are running
+/stop [name]                         — stop a running event by name
+/stop                                — list the names of currently running events
+
+/timer 30                            → TimerEvent(interval=30.0)
+/file war_news/news.md 5.0 "Update!" → FileEvent("war_news/news.md", 5.0, "Update!")
+/project "Build a REST API in Python" → ProjectEvent(goal=...) — plan + execute loop
+```
+
+Quoted strings with spaces are handled correctly (`shlex` tokenisation). Arguments are coerced to their annotated types (`float`, `int`, or `str`). Extra arguments beyond the declared parameters are ignored; missing optional parameters fall back to their defaults.
+
+**Event auto-discovery** — every file dropped in `src/events/` that defines a concrete `Event` subclass with a `name` string attribute is automatically registered. No manual import or registration step needed. The registry (`src/core/events_registry.py`) is scanned at command parse time, so new events are available immediately after saving the file.
+
+**`EventBus` API** — the bus exposes three methods alongside `start()` and `stop()`:
+
+| Method | Description |
+|--------|-------------|
+| `add(event)` | Start a new event on the already-running bus. Creates an independent asyncio task tracked by `stop()`. |
+| `remove(name)` | Cancel and remove the event with the given name. Returns `True` if found. |
+| `running()` | Return a list of names of currently active (non-done) events. |
+
+**Server** — the FastAPI server exposes `GET /events` to list all registered event types with their parameter names. Slash commands sent to `/chat` or `/chat/stream` are handled as one-shot dispatches: the event's `message` is run through `generate_event()` and the response is returned. This lets external orchestration drive a `ProjectEvent` loop across multiple API calls while the `project_state.json` file persists progress on disk between requests.
+
+#### `ProjectEvent` — autonomous project loop
+
+`ProjectEvent` is a special event designed to drive the agent through a multi-step coding or research project without human intervention:
+
+1. **Iteration 0 (planning)** — no state file exists yet. The agent is asked to break the goal into a list of concrete tasks and write them to `state_file` as JSON, then start task 1.
+2. **Iterations 1…N (execution)** — the next pending task is passed to the agent, which completes it and marks it `done: true` in `state_file`.
+3. **Final iteration** — all tasks are done. The agent summarises what was built, then the event stops.
+
+```json
+{
+  "goal": "Build a REST API in Python",
+  "tasks": [
+    {"id": 1, "title": "Set up project structure", "done": true},
+    {"id": 2, "title": "Implement endpoints",       "done": false},
+    {"id": 3, "title": "Write tests",               "done": false}
+  ]
+}
+```
+
+The only contract the agent must honour is updating `"done": true` when it finishes each task. The event reads the file between iterations to advance and eventually stop.
 
 **Defining a new event:**
 
@@ -188,9 +240,9 @@ import asyncio
 from src.core.event import Event
 
 class MyEvent(Event):
-    name = "my_event"
+    name = "my_event"          # used as the slash-command name: /my_event
     description = "Fires when something happens"
-    message = "Something happened, please respond."  # sent to agent; omit if no agent call needed
+    message = "Something happened, please respond."
 
     async def condition(self):
         await asyncio.sleep(30)  # or watch a file, wait on a queue, etc.
@@ -199,12 +251,10 @@ class MyEvent(Event):
         pass  # optional side-effect before the agent message
 ```
 
-Add it to your domain's `events` list:
+Drop the file in `src/events/` — it is discovered automatically and immediately available as `/my_event [args]`. To pre-load events on domain start, add them to the domain's `events` list:
 
 ```python
-events: list = [
-    MyEvent(),
-]
+events: list = [MyEvent()]
 ```
 
 ### UI Layer
@@ -256,19 +306,21 @@ The entire I/O pipeline is non-blocking:
 
 ## Setup
 
-1. **Install dependencies:**
+1. **Install the package:**
+
+   **Core (CLI, tray, server, embedding router):**
 
    ```bash
-   pip install -r requirements.txt
+   pip install -e .
    ```
 
-   **Voice extras (optional)** — only needed for `--voice`:
+   **Full (core + voice — wake-word STT, streaming TTS):**
 
    ```bash
-   pip install faster-whisper openwakeword sounddevice edge-tts piper-tts
+   pip install -e ".[voice]"
    ```
 
-   Models download automatically to `~/.cache/` on first wake (Whisper ~500 MB for `small`, openwakeword ~15 MB, fastembed router ~420 MB).
+   After installation the `andrewcli` command is available system-wide. Models download automatically to `~/.cache/` on first use (Whisper ~500 MB for `small`, openwakeword ~15 MB, fastembed router ~420 MB).
 
 2. **Configure your LLM endpoint** via environment variables:
 
@@ -360,12 +412,15 @@ The entire I/O pipeline is non-blocking:
 
 ### CLI
 
-| Key | Context | Action |
-|-----|---------|--------|
+| Key / Input | Context | Action |
+|-------------|---------|--------|
 | **TAB** | Input prompt | Cycle to the next available domain |
 | **UP / DOWN** | Input prompt | Navigate command history |
 | **ESC** | During response | Stop streaming (background tasks still complete) |
 | **Wake word** (with `--voice`) | Anywhere in CLI | Trigger STT; prompt line switches to `🎙 listening...` until trailing silence or 8 s cap |
+| `/events` | Input prompt | List available event types and which are currently running |
+| `/name [args]` | Input prompt | Start a named event (e.g. `/timer 30`, `/project "Build X"`) |
+| `/stop [name]` | Input prompt | Stop a running event by name; `/stop` alone lists running events |
 
 ### Tray
 
@@ -379,6 +434,9 @@ The entire I/O pipeline is non-blocking:
 | **▽ / △ button** | Header | Toggle between compact and expanded view |
 | **Wake word** (with `--voice`) | Anywhere in desktop | Panel auto-opens, status spinner shows `🎙 listening...`, transcribed request submits like a typed message |
 | **● Voice / ○ Voice button** (with `--voice`) | Header | Toggle STT on/off (green = listening, grey = paused). When off the wake word is ignored and the mic goes cold immediately, even mid-recording |
+| `/events` | Input field | List available event types and which are currently running |
+| `/name [args]` | Input field | Start a named event (e.g. `/timer 30`, `/project "Build X"`) |
+| `/stop [name]` | Input field | Stop a running event by name; `/stop` alone lists running events |
 
 ---
 
@@ -394,10 +452,29 @@ Andrew: File greeting.txt written successfully.
 [general] Ask: ↑                          # UP recalls last message
 [general] Ask: [TAB]                      # TAB switches domain
 Switched to domain: coding
+[coding] Ask: /project "Build a REST API in Python"
+✓ Event 'project' started
 [coding] Ask:
 
-◆ Event [timer]: Fires every N seconds   # event fires in background
-Andrew: ...
+◆ Event [project]: Project: Build a REST API in Python
+⠋ Running write_file: pyproject.toml     # agent works autonomously
+Andrew: Task 1 done — project structure created.
+
+◆ Event [project]: Project: Build a REST API in Python
+⠋ Running write_file: src/main.py        # next iteration, next task
+Andrew: Task 2 done — endpoints implemented.
+
+[coding] Ask: /stop project              # stop at any time
+✓ Event 'project' stopped
+[coding] Ask: /events                    # inspect running events
+No events currently running.
+
+Available slash commands:
+  /file [path] [poll_interval] [message]
+  /project [goal] [state_file]
+  /timer [interval]
+  /events              — show this list
+  /stop [name]         — stop a running event
 ```
 
 The agent chains tool calls automatically — a skill might instruct the LLM to read a file, transform its contents, and write the result back. The spinner shows which tool is running in real time; model reasoning inside `<think>` tags is displayed in dim italic. Events fire independently in the background and interleave cleanly with user interactions.
@@ -486,9 +563,13 @@ import asyncio
 from src.core.event import Event
 
 class MyEvent(Event):
-    name = "my_event"
+    name = "my_event"          # becomes the slash command: /my_event [arg]
     description = "Short description shown in notifications"
     message = "Prompt sent to the agent when this event fires."
+
+    def __init__(self, arg: str = "default"):
+        self.arg = arg
+        self.description = f"MyEvent with arg={arg}"
 
     async def condition(self):
         await asyncio.sleep(60)  # block until condition is met
@@ -497,13 +578,20 @@ class MyEvent(Event):
         pass  # optional side-effect before the agent message
 ```
 
-Add it to your domain:
+The event is **auto-discovered** the moment the file is saved — no import or registration needed. Activate it at runtime:
+
+```
+/my_event hello          → MyEvent("hello")
+/my_event                → MyEvent()   (uses default)
+```
+
+To pre-load it at domain start, add it to the `events` list:
 
 ```python
-from src.events.my_event import MyEvent
-
-events: list = [MyEvent()]
+events: list = [MyEvent("hello")]
 ```
+
+Events with a dynamic `message` property (computed from state rather than a fixed string) are supported — the `EventBus` reads `event.message` after `trigger()` returns, so the value can change between iterations. See `ProjectEvent` for an example.
 
 ---
 

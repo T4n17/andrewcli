@@ -64,11 +64,48 @@ class EventBus:
         ]
         await asyncio.gather(*self._tasks, return_exceptions=True)
 
+    def add(self, event: Event) -> None:
+        """Add and immediately start a new event on the running bus.
+
+        Safe to call after start() — creates an independent asyncio task
+        that is tracked in _tasks so stop() cancels it too.
+        notify and dispatch must already be set before the event first fires.
+        """
+        self._events.append(event)
+        task = asyncio.create_task(self._run(event), name=f"event:{event.name}")
+        self._tasks.append(task)
+
+    def remove(self, name: str) -> bool:
+        """Cancel and remove the event with the given name.
+
+        Returns True if found and cancelled, False if no such event is running.
+        Task.cancel() is thread-safe; list mutation is safe here because only
+        the owner thread (the one that calls add/remove/stop) ever mutates the
+        lists — the bg asyncio loop only reads them.
+        """
+        for i, event in enumerate(self._events):
+            if event.name == name:
+                if i < len(self._tasks):
+                    self._tasks[i].cancel()
+                    self._tasks.pop(i)
+                self._events.pop(i)
+                return True
+        return False
+
+    def running(self) -> list[str]:
+        """Return the names of all currently active (non-done) events."""
+        return [
+            event.name
+            for event, task in zip(self._events, self._tasks)
+            if not task.done()
+        ]
+
     def stop(self) -> None:
         """Cancel all running event tasks."""
         for task in self._tasks:
             task.cancel()
         self._tasks.clear()
+        self._events.clear()
 
     async def _run(self, event: Event) -> None:
         while True:

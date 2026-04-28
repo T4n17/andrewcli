@@ -4,6 +4,7 @@ from src.tools.skills import SkillCompiler
 from src.skills.myskills import Example, CreateSkill
 
 class GeneralDomain(Domain):
+    routing_enabled: bool = False
     system_prompt: str = (
         "You are a helpful assistant with access to tools. "
         "When a task can be accomplished with a tool, always call the tool — "

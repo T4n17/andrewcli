@@ -94,23 +94,25 @@ class LoopState(BaseModel):
 _PLAN_PROMPT = """\
 Loop goal: {goal}
 
-You are starting a LOOP — a single action that repeats every iteration \
-until a stop condition is met. Read the goal carefully and identify:
+## Step 1 — Identify the action
+Read the goal above. Find the single, concrete action to repeat each \
+iteration. Phrase it as one self-contained step \
+(e.g. "fetch the current oil price via google_search", \
+"poll endpoint /status and parse the JSON response").
 
-  1. The ACTION to repeat each iteration. Phrase it as one concrete, \
-self-contained step a developer can execute (e.g. "fetch the current oil \
-price via google_search", "poll endpoint /status and parse the JSON").
-  2. The EXIT CRITERIA — every distinct condition under which the loop \
-must stop. Copy them verbatim from the goal where possible (e.g. \
-"price drops below $100", "status == 'ready'", "5 consecutive failures", \
-"24 hours have elapsed").
+## Step 2 — Identify the exit criteria
+Find every distinct condition under which the loop must stop. Copy each \
+one verbatim from the goal \
+(e.g. "price drops below $100", "status == 'ready'", \
+"5 consecutive failures", "24 hours have elapsed").
 
-Write the loop spec to `{state_file}` using this JSON schema as a \
-MINIMUM (the keys below are mandatory):
+## Step 3 — Write the loop spec to `{state_file}`
+Write valid JSON using this exact schema (all keys are required):
+
 {{
   "goal": "{goal}",
-  "action": "...",
-  "exit_criteria": ["...", "..."],
+  "action": "the repeated action",
+  "exit_criteria": ["condition 1", "condition 2"],
   "max_iterations": {cap_value},
   "iterations": 0,
   "last_observation": "",
@@ -120,16 +122,14 @@ MINIMUM (the keys below are mandatory):
 
 {cap_explanation}
 
-You MAY EXTEND this schema with additional top-level fields if you need \
-to track custom data across iterations — running totals, observation \
-history, retry counters, accumulated logs, anything that helps you \
-reason between turns. Any extra fields you add will be preserved \
-verbatim in the canonical state shown to you each iteration; treat them \
-as your private scratchpad. Only the fields listed above are \
-interpreted by the loop machinery, everything else is yours.
+You may add extra top-level fields (running totals, history, retry \
+counters, accumulated logs) as a private scratchpad. Extra fields are \
+preserved verbatim every iteration. Only the schema fields listed above \
+are interpreted by the loop.
 
-After writing the file, stop. The loop driver will start iteration 1 on \
-the next run.\
+## Step 4 — Stop
+Write the file, then stop immediately. \
+The loop driver will start iteration 1 on the next run.\
 """
 
 _ITER_PROMPT = """\
@@ -137,58 +137,59 @@ Loop goal: {goal}
 {exit_block}\
 {iter_header}
 
-Current canonical state of `{state_file}` (authoritative — this is what \
-the loop sees, regardless of what is on disk). The mandatory fields \
-below MUST keep these exact names — inventing keys like `iterations_done` \
-or values like the string `"unlimited"` will be ignored. Any other \
-fields you see in the JSON below are custom scratchpad data you added \
-in a previous iteration; they will be preserved verbatim, and you may \
-add more or update them freely:
+## Current state:
 
 ```json
 {canonical_json}
 ```
 
-Do NOT read `{state_file}` — the canonical JSON above is authoritative \
-and already matches what the driver sees. Use it as the base for your write.
+The required field names are exact — do not invent aliases like \
+`iterations_done`. Any extra fields in the JSON above are your scratchpad \
+from previous iterations; update them freely.
 
-Now, in this single iteration:
+## Your job this iteration — follow IN ORDER, then stop:
+
   1. Perform the action exactly ONCE.
-  2. Observe the result and record concrete facts (numbers, status, \
-error messages — not opinions).
-  3. Evaluate EVERY exit criterion above against your observation.
+  2. Record the result as concrete facts (numbers, status codes, error \
+messages — not opinions or guesses).
+  3. Check EVERY exit criterion above against your observation.
   4. Write the updated JSON to `{state_file}`:
-       • increment `iterations` by 1
-       • set `last_observation` to your factual record from step 2
-       • if ANY exit criterion is met, set `terminated` to true and \
-write the criterion verbatim into `termination_reason`
-       • if no criterion is met, leave `terminated` as false — the loop \
-will call you again
-  5. Write a one-sentence observation summary, then STOP. Do not perform \
-the action again. Do not start a second iteration — the loop schedules them.
+       • Increment `iterations` by 1.
+       • Set `last_observation` to your factual result from step 2.
+       • If ANY exit criterion is met: set `terminated` to true and copy \
+the criterion verbatim into `termination_reason`.
+       • If no criterion is met: leave `terminated` as false.
+  5. Write ONE sentence summarising what you observed. Stop immediately \
+after that sentence — do not add more text, do not repeat yourself.
 
-LOOP RULES — the loop owns this file:
-  • You may only update `iterations`, `last_observation`, `terminated`, \
-and `termination_reason`. Edits to `goal`, `action`, `exit_criteria`, or \
-`max_iterations` will be silently overwritten on the next iteration.
-  • `iterations` is monotonic — never decrease it, never skip ahead.
-  • `terminated` is sticky — once true, it cannot go back to false.
-  • If you cannot evaluate the exit criteria (e.g. the action failed), \
-record the failure in `last_observation`, leave `terminated` false, and \
-the loop will retry on the next iteration.\
+Do not perform the action again. Do not start a second iteration. \
+The loop schedules the next iteration automatically.
+
+## Loop rules — the loop owns this file
+  • You may only update: `iterations`, `last_observation`, `terminated`, \
+`termination_reason`.
+  • Do NOT edit: `goal`, `action`, `exit_criteria`, `max_iterations`. \
+Any edits to these will be silently overwritten on the next iteration.
+  • `iterations` only goes up — never decrease it or skip ahead.
+  • `terminated` is permanent — once true it cannot be set back to false.
+  • Action failed? Record the failure in `last_observation`, leave \
+`terminated` as false. The loop will retry on the next iteration.
+  • You MAY add or update custom top-level fields as a private scratchpad. \
+They are preserved verbatim every iteration.\
 """
 
 _DONE_PROMPT = """\
 Loop goal: {goal}
 {exit_block}\
-The loop has stopped after {iterations} iteration(s).
+## Loop complete — {iterations} iteration(s) run
 
-  termination reason : {termination_reason}
-  last observation   : {last_observation}
+  Termination reason : {termination_reason}
+  Last observation   : {last_observation}
 
-Summarise what happened across the run, state which exit criterion \
-triggered (or that the iteration cap was reached), and confirm the \
-loop is complete.\
+Write ONE short paragraph (2-4 sentences): what happened across the run, \
+which exit criterion triggered (or that the iteration cap was reached), and \
+that the loop is complete. Do not repeat yourself. Do not add extra sections \
+or lists. Stop immediately after the paragraph — your turn is over.\
 """
 
 

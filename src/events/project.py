@@ -88,42 +88,39 @@ class ProjectState(BaseModel):
 _PLAN_PROMPT = """\
 Project goal: {goal}
 
-You are starting a new project. First, read the goal carefully and identify \
-any explicit CONSTRAINTS, stop conditions, deadlines, or "do not" rules \
-stated in it (e.g. "stop when X", "only use Y", "notify me if Z"). Copy \
-them verbatim into the `constraints` array below — they will be re-injected \
-into every subsequent iteration so you do not forget them.
+## Step 1 — Extract constraints
+Read the goal above. Find any explicit rules, limits, deadlines, or stop \
+conditions (e.g. "only use Y", "stop when X", "notify me if Z"). Copy each \
+one verbatim into the `constraints` list. If the goal has none, use `[]`.
 
-Then break the goal into concrete, sequential tasks a developer can execute \
-one at a time. A task must only be marked `done` once its real-world effect \
-has actually happened: do NOT pre-mark monitoring or conditional tasks as \
-done just because you wrote code for them.
+## Step 2 — List the tasks
+Break the goal into concrete, sequential tasks a developer can execute one \
+at a time. Set every task to `"done": false` now. Only flip a task to \
+`"done": true` after its real-world effect has actually happened. Never \
+pre-mark tasks as done.
 
-Write the plan to `{state_file}` using this JSON schema as a MINIMUM \
-(the keys below are mandatory):
+## Step 3 — Write the plan to `{state_file}`
+Write valid JSON using this exact schema (all keys are required):
+
 {{
   "goal": "{goal}",
-  "constraints": ["...", "..."],
+  "constraints": ["constraint 1", "constraint 2"],
   "tasks": [
-    {{"id": 1, "title": "...", "done": false}},
-    ...
+    {{"id": 1, "title": "first task", "done": false}},
+    {{"id": 2, "title": "second task", "done": false}}
   ]
 }}
 
-If the goal contains no explicit constraints, use an empty array: \
-`"constraints": []`.
+No constraints? Use: `"constraints": []`
 
-You MAY EXTEND this schema with additional top-level fields and \
-additional fields inside each task object if you need to track custom \
-data across iterations — notes, dependencies between tasks, observations, \
-artefact paths, sub-step checklists, anything that helps you stay on \
-track between turns. Any extra fields you add will be preserved \
-verbatim in the canonical state shown to you each iteration; treat them \
-as your private scratchpad. Only the fields listed above are \
-interpreted by the project machinery, everything else is yours.
+You may add extra fields (notes, observations, dependencies) at the top \
+level or inside task objects. These extra fields are your private scratchpad \
+and will be preserved verbatim across all iterations. Only the schema fields \
+listed above are interpreted by the system.
 
-After writing the file, stop. The project driver will assign task 1 on \
-the next iteration.\
+## Step 4 — Stop
+Write the file, then stop immediately. \
+The system will dispatch task 1 on the next iteration.\
 """
 
 _TASK_PROMPT = """\
@@ -131,58 +128,55 @@ Project goal: {goal}
 {constraints_block}\
 Progress: {done}/{total} tasks complete.
 
-Canonical state of `{state_file}` — do NOT read the file; this JSON \
-is authoritative and already matches what the driver sees:
+## Current state:
 
 ```json
 {canonical_json}
 ```
 
-Task list at a glance:
+## Task list
 {task_list_block}
-Current task ({task_id}/{total}): {title}
+## Your task: [{task_id}/{total}] {title}
 
-Complete this task and nothing more. Do not call any verification tool \
-more than once — if you already confirmed the effect, proceed immediately \
-to the steps below.
+Do this task and only this task. Do not work ahead on other tasks. \
+Do not call any verification tool more than once.
 
-When the task's real-world effect is achieved, do the following IN ORDER \
-and then stop:
-  1. Write the updated JSON to `{state_file}` with task {task_id}'s \
-`"done"` flipped to true.
-  2. Write one short paragraph stating what you did.
-  3. Make NO further tool calls. Your turn ends here. The loop will \
-dispatch the next task on the following iteration.
+## When the task is done, follow these steps IN ORDER then stop:
 
-CRITICAL — THE ONLY WAY TO ADVANCE: if you do not write `{state_file}` \
-with task {task_id}'s `"done": true`, this exact task will be dispatched \
-again on the next iteration. There is no other signal. Forgetting to \
-write the file means repeating this task indefinitely.
+  1. Write the updated JSON to `{state_file}` with task {task_id} \
+changed to `"done": true`.
+  2. Write one short paragraph describing what you did.
+  3. Write ONE sentence confirming what you did. Stop immediately after \
+that sentence — do not add more text, do not repeat yourself.
 
-STATE FILE RULES — the loop owns the schema fields:
-  • You may only change `done` flags from false to true. Any edits to \
-`goal`, `constraints`, task `id`s or `title`s, the task list itself, or \
-any attempt to flip a `done` flag back to false, will be silently \
-overwritten on the next iteration.
-  • Do not delete tasks. Do not add tasks. Do not reorder them.
-  • Do not redo a task already marked [x] above — it is permanently done.
-  • If the current task's condition is not yet met (e.g. a monitored value \
-hasn't crossed a threshold), leave `done` as false and explain what you \
-observed — the loop will call you again.
-  • You MAY add or update CUSTOM fields not listed in the schema, both \
-at the top level and inside individual task objects (notes, observed \
-values, dependency lists, scratch data). Custom fields will be preserved \
-verbatim across iterations — use them as your private scratchpad.\
+## WARNING — the only way to advance
+The ONLY way to move to the next task is to write `{state_file}` with \
+task {task_id} set to `"done": true`. If you skip this write, this same \
+task will repeat on the next iteration indefinitely.
+
+## State file rules
+  • Only change `done` from false to true. Never set it back to false.
+  • Do NOT edit: `goal`, `constraints`, task `id`s, task `title`s, or \
+task order.
+  • Do NOT add or remove tasks.
+  • Do NOT redo tasks already marked [x] — they are permanently done.
+  • Task not yet complete (e.g. waiting for a condition)? Leave `done` \
+as false and describe what you observed. The loop will call you again.
+  • You MAY add or update custom fields (notes, observed values, scratch \
+data) at the top level or inside task objects. They are preserved \
+verbatim every iteration as your private scratchpad.\
 """
 
 _DONE_PROMPT = """\
 Project goal: {goal}
 {constraints_block}\
-Final state of `{state_file}`:
+## Project complete — all {total} tasks done
+
+Final task list from `{state_file}`:
 {task_list_block}
-All {total} tasks are marked done. Summarise what was built, confirm \
-every constraint above was honoured, and confirm the project is \
-complete.\
+Write ONE short paragraph (2-4 sentences): what was built and whether every \
+constraint above was honoured. Do not repeat yourself. Do not add extra \
+sections or lists. Stop immediately after the paragraph — your turn is over.\
 """
 
 

@@ -19,17 +19,18 @@ from src.voice.session import VoiceSession
 from src.voice.stt import SpeechToText
 from src.voice.tts import TextToSpeech
 from src.voice.tts_edge import EdgeTTS
+from src.voice.tts_glados import GladosTTS
 
 if TYPE_CHECKING:
     from src.shared.config import Config
 
 __all__ = [
-    "SpeechToText", "TextToSpeech", "EdgeTTS", "VoiceSession",
+    "SpeechToText", "TextToSpeech", "EdgeTTS", "GladosTTS", "VoiceSession",
     "build_voice_io", "strip_markdown",
 ]
 
-# Public type alias for the TTS backend: either Piper or Edge.
-TTSBackend = Union[TextToSpeech, EdgeTTS]
+# Public type alias for the TTS backend.
+TTSBackend = Union[TextToSpeech, EdgeTTS, GladosTTS]
 
 
 def build_voice_io(config: "Config | None" = None) -> tuple[SpeechToText, TTSBackend]:
@@ -39,7 +40,7 @@ def build_voice_io(config: "Config | None" = None) -> tuple[SpeechToText, TTSBac
 
     - ``voice.wake_word``, ``voice.wake_threshold`` (STT activation)
     - ``voice.stt_model``, ``voice.stt_language`` (faster-whisper)
-    - ``voice.tts_engine`` (``"piper"`` or ``"edge"``)
+    - ``voice.tts_engine`` (``"glados"``, ``"piper"``, or ``"edge"``)
     - ``voice.tts_voice``, ``voice.tts_speed``
     - ``voice.input_device`` / ``voice.output_device``
     """
@@ -55,8 +56,13 @@ def build_voice_io(config: "Config | None" = None) -> tuple[SpeechToText, TTSBac
     )
 
     engine = (cfg.voice_tts_engine or "piper").lower()
-    if engine == "edge":
-        tts: TTSBackend = EdgeTTS(
+    if engine == "glados":
+        tts: TTSBackend = GladosTTS(
+            speed=cfg.voice_tts_speed,
+            output_device=cfg.voice_output_device,
+        )
+    elif engine == "edge":
+        tts = EdgeTTS(
             voice=cfg.voice_tts_voice,
             speed=cfg.voice_tts_speed,
             output_device=cfg.voice_output_device,
@@ -69,6 +75,6 @@ def build_voice_io(config: "Config | None" = None) -> tuple[SpeechToText, TTSBac
         )
     else:
         raise ValueError(
-            f"Unknown voice.tts_engine={engine!r}; use 'piper' or 'edge'."
+            f"Unknown voice.tts_engine={engine!r}; use 'glados', 'piper', or 'edge'."
         )
     return stt, tts

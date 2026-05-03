@@ -33,11 +33,12 @@ voice:
   stt_model: "small"
   # STT language: "auto" or ISO code (e.g. "en", "it")
   stt_language: "it"
-  # TTS engine: "piper" (fast, local, robotic) or "edge" (Microsoft
-  # Azure Neural TTS via the free Edge endpoint, excellent quality,
-  # needs internet, ~500ms first-audio latency).
+  # TTS engine:
+  #   "glados" - Custom ONNX GLaDOS voice (local, English-only, no install needed)
+  #   "piper"  - Local ONNX VITS voices via piper-tts (multilingual, fast)
+  #   "edge"   - Microsoft Azure Neural TTS (excellent quality, needs internet)
   tts_engine: "edge"
-  # Voice name format depends on the engine:
+  # Voice name — used only by piper and edge engines (ignored by glados).
   #   piper: <lang>_<region>-<speaker>-<quality>
   #          e.g. en_US-amy-medium, it_IT-riccardo-x_low
   #   edge:  <lang>-<region>-<name>Neural

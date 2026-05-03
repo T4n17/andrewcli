@@ -37,7 +37,8 @@ AndrewCLI/
     ├── events/                     # Event definitions — auto-discovered, activated via /name
     │   ├── timer.py                # TimerEvent — fires on a fixed interval
     │   ├── file.py                 # FileEvent — fires when a watched file is modified
-    │   └── project.py              # ProjectEvent — drives the agent through a multi-step project
+    │   ├── project.py              # ProjectEvent — drives the agent through a multi-step project
+    │   └── loop.py                 # LoopEvent — drives a 'do X until Y' loop with exit criteria
     ├── ui/                         # CLI rendering layer
     │   ├── animations.py           # Spinner (async, dynamic status)
     │   ├── filter.py               # ThinkFilter — parses <think> tags for reasoning display
@@ -176,7 +177,8 @@ If the event sets a `message` string, the `EventBus` automatically dispatches it
 |-------|---------------|-------------|
 | `TimerEvent` | `/timer [interval]` | Fires every N seconds |
 | `FileEvent` | `/file [path] [poll_interval] [message]` | Fires when a watched file is modified |
-| `ProjectEvent` | `/project [goal] [state_file]` | Drives the agent through a multi-step project: plans on the first invocation, executes one task per invocation, stops when all tasks are marked done in `state_file` |
+| `ProjectEvent` | `/project [goal] [state_file]` | Drives the agent through a multi-step project: plans on the first invocation, executes one task per invocation, stops when all tasks are marked done in `state_file`. Calling `/project` with no arguments resumes from the existing `state_file` (goal recovered from the file) |
+| `LoopEvent` | `/loop [goal] [max_iterations] [state_file]` | Drives a `do X until Y` loop: plans the action and exit criteria on the first invocation, performs the action once per iteration, stops when any exit criterion fires (or, if a positive `max_iterations` was set, when the cap is hit). `max_iterations` is optional and defaults to `0` (uncapped — runs until a criterion fires). Calling `/loop` with no arguments resumes from the existing `state_file` |
 
 **Notification** — when an event fires, both surfaces are notified:
 - **CLI**: a colored banner (`◆ Event [name]`) is printed, followed by the agent's streamed response.
@@ -196,6 +198,10 @@ Events are activated at runtime via slash commands — no domain restart require
 /timer 30                            → TimerEvent(interval=30.0)
 /file war_news/news.md 5.0 "Update!" → FileEvent("war_news/news.md", 5.0, "Update!")
 /project "Build a REST API in Python" → ProjectEvent(goal=...) — plan + execute loop
+/project                              → ProjectEvent() — resume from project_state.json
+/loop "Monitor oil price; stop if < $100" → LoopEvent(goal=...) — uncapped
+/loop "Poll /status until ready" 30   → LoopEvent(goal=..., max_iterations=30)
+/loop                                  → LoopEvent() — resume from loop_state.json
 ```
 
 Quoted strings with spaces are handled correctly (`shlex` tokenisation). Arguments are coerced to their annotated types (`float`, `int`, or `str`). Extra arguments beyond the declared parameters are ignored; missing optional parameters fall back to their defaults.
@@ -210,28 +216,101 @@ Quoted strings with spaces are handled correctly (`shlex` tokenisation). Argumen
 | `remove(name)` | Cancel and remove the event with the given name. Returns `True` if found. |
 | `running()` | Return a list of names of currently active (non-done) events. |
 
-**Server** — the FastAPI server exposes `GET /events` to list all registered event types with their parameter names. Slash commands sent to `/chat` or `/chat/stream` are handled as one-shot dispatches: the event's `message` is run through `generate_event()` and the response is returned. This lets external orchestration drive a `ProjectEvent` loop across multiple API calls while the `project_state.json` file persists progress on disk between requests.
+**Server** — the FastAPI server exposes `GET /events` to list all registered event types with their parameter names. Slash commands sent to `/chat` or `/chat/stream` are handled as one-shot dispatches: the event's `message` is run through `generate_event()` and the response is returned. This lets external orchestration drive a `ProjectEvent` or `LoopEvent` across multiple API calls while the corresponding state file (`project_state.json` / `loop_state.json`) persists progress on disk between requests.
 
 #### `ProjectEvent` — autonomous project loop
 
 `ProjectEvent` is a special event designed to drive the agent through a multi-step coding or research project without human intervention:
 
-1. **Iteration 0 (planning)** — no state file exists yet. The agent is asked to break the goal into a list of concrete tasks and write them to `state_file` as JSON, then start task 1.
+1. **Iteration 0 (planning)** — no state file exists yet. The agent is asked to extract any explicit constraints from the goal and break it into a list of concrete tasks, writing both to `state_file` as JSON, then start task 1.
 2. **Iterations 1…N (execution)** — the next pending task is passed to the agent, which completes it and marks it `done: true` in `state_file`.
-3. **Final iteration** — all tasks are done. The agent summarises what was built, then the event stops.
+3. **Final iteration** — all tasks are done. The agent summarises what was built and confirms each constraint was honoured, then the event stops.
+
+**Resume mode** — invoking `/project` with no goal (just `/project`) reads the existing `state_file`, recovers the goal from its `"goal"` field, and picks up at the next pending task. This is the recommended way to continue a project across restarts: the same JSON file drives both progress tracking and resumption. If no state file exists (or it has no `goal` field), the event raises a clear error pointing back to `/project <goal>`.
 
 ```json
 {
   "goal": "Build a REST API in Python",
+  "constraints": ["Use only the standard library", "All endpoints under /api/v1"],
   "tasks": [
-    {"id": 1, "title": "Set up project structure", "done": true},
-    {"id": 2, "title": "Implement endpoints",       "done": false},
+    {"id": 1, "title": "Set up project structure", "done": true,
+     "artefacts": ["pyproject.toml", "src/api/__init__.py"]},
+    {"id": 2, "title": "Implement endpoints",       "done": false,
+     "subtasks": ["GET /users", "POST /users"]},
     {"id": 3, "title": "Write tests",               "done": false}
-  ]
+  ],
+  "build_log": ["installed deps", "scaffolded routes"]
 }
 ```
 
-The only contract the agent must honour is updating `"done": true` when it finishes each task. The event reads the file between iterations to advance and eventually stop.
+**State rigor (loop-owned schema fields)** — the file is parsed via a Pydantic 2 model (`ProjectState` / `ProjectTask`) so wrong field names like `is_done` / `completed` / `finished` are accepted as aliases for `done`, integer task ids are coerced to strings, malformed payloads fall back to a fresh plan, and constraints written as a single string are coerced to a list. On top of that, the agent only owns the `done` flags. On the first read of a planned file, `ProjectEvent` snapshots `goal`, `constraints`, and the task `id`/`title` pairs in memory; subsequent reads rebuild the state from the snapshot, importing only `done` flags from disk. Done flags are also **monotonic** — once a task is observed `done: true`, it stays done, even if the agent later flips the on-disk value back to false in a misguided "loop forever" attempt. Every per-task prompt embeds the canonical task list with checkboxes (`[x]` / `[ ]`) and a `<- CURRENT` pointer, so the agent always sees authoritative progress regardless of what is on disk. Once the completion summary is dispatched, the event is permanently terminal.
+
+**Constraints** are first-class: the planner is instructed to copy stop conditions, deadlines, and "do not" rules verbatim from the goal into a `constraints` array, and the loop re-injects them as a bullet block above every iteration's prompt so they survive rolling-memory trimming.
+
+**Agent scratchpad (custom fields)** — the schema above is the *minimum* required structure; the agent is free to add custom fields, both at the top level (`build_log`, `outstanding_questions`, dependency maps) and inside individual task objects (`artefacts`, `subtasks`, `notes`, `estimated_hours`). The Pydantic model is configured with `extra="allow"`, and the reconciliation step explicitly carries every unknown field through to the next iteration's prompt. This gives the agent a durable, structured place to keep working memory across iterations without the loop machinery interfering with it. The contract is simple:
+
+  | Field type | Owner | Mutability across iterations |
+  |---|---|---|
+  | `goal`, `constraints`, task `id`/`title`, task list shape | Loop | Immutable (snapshot-restored) |
+  | task `done` flags | Agent | Monotonic (`false → true` only) |
+  | Any other field, top-level or per-task | Agent | Free-form (preserved verbatim) |
+
+#### `LoopEvent` — do X until Y is met
+
+`LoopEvent` is the counterpart to `ProjectEvent` for goals shaped as *"keep doing X until Y"* rather than *"complete tasks A, B, C"*. Examples: monitor a metric until it crosses a threshold, poll an endpoint until it returns ready, retry an action until it succeeds.
+
+1. **Iteration 0 (planning)** — no state file exists yet. The agent extracts the single repeating `action` and the list of `exit_criteria` from the goal, writes them to `state_file`, then performs iteration 1.
+2. **Iterations 1…N (execution)** — each iteration the agent performs the action exactly once, records a concrete `last_observation`, and evaluates every exit criterion. If any criterion is met it sets `terminated: true` and writes a `termination_reason`.
+3. **Final iteration** — either an exit criterion fired, or (if a cap was set) `iterations` reached `max_iterations`. The agent summarises the run and the event stops.
+
+**Resume mode** — invoking `/loop` with no goal reads the existing `state_file` and continues from the last recorded iteration count. If a `max_iterations` argument is passed on resume, it overrides whatever was previously on disk; otherwise the on-disk value (if any) is preserved.
+
+```json
+{
+  "goal": "Monitor oil price; stop when < $100/bbl",
+  "action": "Fetch the current WTI price via google_search",
+  "exit_criteria": ["price < 100 USD/bbl", "24 hours elapsed"],
+  "max_iterations": null,
+  "iterations": 7,
+  "last_observation": "Iteration 7: price = 102.4 USD/bbl",
+  "terminated": false,
+  "termination_reason": "",
+  "price_history": [110.2, 109.8, 108.4, 107.1, 105.6, 103.9, 102.4],
+  "rolling_avg": 106.8,
+  "consecutive_above_threshold": 7
+}
+```
+
+**State rigor (loop-owned schema fields)** — the file is parsed via a Pydantic 2 model (`LoopState`) so wrong field names like `iterations_done` / `iter_count` / `iters` are accepted as aliases for `iterations`, sloppy values like the literal string `"unlimited"` are coerced to `null` for `max_iterations`, and malformed payloads fall back to a fresh plan rather than crashing. On top of that, the same snapshot pattern as `ProjectEvent` applies: the immutable fields (`goal`, `action`, `exit_criteria`, `max_iterations`) are captured on the first read and restored on every subsequent read, so the agent cannot rewrite the action mid-loop. The progress fields are tightly constrained:
+
+| Field | Mutability |
+|---|---|
+| `iterations` | **Monotonic** — the loop tracks an in-memory floor; on-disk decreases are ignored |
+| `terminated` | **Sticky** — `false → true` only; un-terminating after the summary cannot restart the loop |
+| `last_observation`, `termination_reason` | Free-form, agent-owned |
+
+Every iteration prompt embeds the authoritative state as a fenced JSON block produced by `model_dump_json()`, so the agent sees the *exact* canonical field names it must use — eliminating the prose-to-key drift class of bugs (e.g. an agent inventing `"iterations_done"` because the prompt said "iterations done : 5"). It also gives continuity across iterations: the agent can detect trends like "the price has risen for three iterations in a row" by reading its own previous custom fields.
+
+**Agent scratchpad (custom fields)** — the schema above is the *minimum* required structure; the agent is free to add top-level custom fields such as `price_history`, `rolling_avg`, `consecutive_above_threshold`, retry counters, observation logs, or anything else useful between turns. The `LoopState` Pydantic model is configured with `extra="allow"`, and the reconciliation step carries every unknown field through to the next iteration's canonical JSON block. The contract:
+
+  | Field type | Owner | Mutability across iterations |
+  |---|---|---|
+  | `goal`, `action`, `exit_criteria`, `max_iterations` | Loop | Immutable (snapshot-restored) |
+  | `iterations` | Loop | Monotonic floor (only goes up) |
+  | `terminated`, `termination_reason` | Agent→Loop | Sticky (false→true only) |
+  | `last_observation` | Agent | Free-form |
+  | Any other field | Agent | Free-form (preserved verbatim) |
+
+**Optional `max_iterations` cap** — the iteration cap is a constructor parameter (`/loop [goal] [max_iterations] [state_file]`) and is **optional**. The default (`0`) means *uncapped* — the loop runs forever until an exit criterion fires. Pass any positive integer to enforce a hard ceiling, e.g. `/loop "Poll /status until ready" 30`. The user-supplied value always wins over whatever the planner wrote to disk, so `/loop "" 10` is a valid way to tighten the cap on a paused loop. Resolution order on every read: **user-passed cap → on-disk cap → uncapped**.
+
+  | `max_iterations` value | Behaviour |
+  |---|---|
+  | `0` (default) or `null` on disk | Uncapped — only an exit criterion can stop the loop |
+  | positive integer | Hard cap; loop also stops when `iterations >= max_iterations` |
+
+Use the cap as a safety net for goals where local models may misjudge the exit criterion (numeric comparisons, ambiguous phrasing) — leave it off for genuinely open-ended monitors that should run until the world changes.
+
+**`LoopEvent` vs `ProjectEvent`** — use `ProjectEvent` for goals that decompose into a finite checklist ("build X, write Y, deploy Z"); use `LoopEvent` for goals shaped as a predicate ("keep doing X until Y"). Mechanically: `ProjectEvent` terminates by completion count, `LoopEvent` terminates by predicate.
 
 **Defining a new event:**
 
@@ -592,9 +671,3 @@ events: list = [MyEvent("hello")]
 ```
 
 Events with a dynamic `message` property (computed from state rather than a fixed string) are supported — the `EventBus` reads `event.message` after `trigger()` returns, so the value can change between iterations. See `ProjectEvent` for an example.
-
----
-
-## TODO
-
-- [ ] Write a skill that allows AndrewCLI to update itself with new tools, skills, or domains

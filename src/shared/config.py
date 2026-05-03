@@ -46,7 +46,7 @@ class Config:
         self.voice_wake_threshold = float(voice.get("wake_threshold", 0.5))
         self.voice_stt_model = voice.get("stt_model", "small")
         self.voice_stt_language = voice.get("stt_language", "auto")
-        self.voice_tts_engine = voice.get("tts_engine", "piper")  # "piper" | "edge"
+        self.voice_tts_engine = voice.get("tts_engine", "piper")
         self.voice_tts_voice = voice.get("tts_voice", "en_US-amy-medium")
         self.voice_tts_speed = float(voice.get("tts_speed", 1.0))
         self.voice_input_device = voice.get("input_device")   # None = default

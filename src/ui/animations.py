@@ -1,5 +1,6 @@
 import asyncio
 import itertools
+import shutil
 import sys
 
 
@@ -11,7 +12,11 @@ class Spinner:
 
     async def _animate(self):
         for frame in itertools.cycle(self._frames):
-            sys.stdout.write(f"\r\033[K\033[36m{frame} {self.status}\033[0m")
+            width = shutil.get_terminal_size((80, 20)).columns
+            line = f"{frame} {self.status}"
+            if len(line) > width - 1:
+                line = line[:width - 4] + "..."
+            sys.stdout.write(f"\r\033[K\033[36m{line}\033[0m")
             sys.stdout.flush()
             await asyncio.sleep(0.08)
 

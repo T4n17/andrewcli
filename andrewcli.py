@@ -54,6 +54,7 @@ def main():
         cmd = [sys.executable, "-m", "src.tray"]
         if args.voice:
             cmd.append("--voice")
+        cmd += ["--host", args.host, "--port", str(args.port)]
         subprocess.Popen(
             cmd,
             start_new_session=True,
@@ -61,6 +62,7 @@ def main():
             stderr=log,
         )
         print(f"Andrew tray started in background. Logs: {log_path}")
+        print(f"API server will be available at http://{args.host}:{args.port}")
 
     elif args.server:
         import uvicorn
@@ -68,6 +70,9 @@ def main():
 
     else:
         from src.app import AndrewCLI
+        from src.core.server import start_background
+        start_background(args.host, args.port)
+        print(f"API server running on http://{args.host}:{args.port}")
         try:
             andrew = AndrewCLI(voice_enabled=args.voice)
             asyncio.run(andrew.run())

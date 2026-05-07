@@ -179,6 +179,33 @@ class AndrewCLI:
         sys.stdout.flush()
         await self.renderer.render(self.domain.generate_event(event.message))
 
+    async def _await_bridge(self) -> tuple[str, str]:
+        """Block until a message arrives in the bridge inbox."""
+        from src.core import server as bridge
+        while True:
+            try:
+                return bridge.inbox.get_nowait()
+            except Exception:
+                await asyncio.sleep(0.05)
+
+    async def _stream_response_bridged(self, sid: str, message: str) -> None:
+        """Like _stream_response but also captures tokens into the bridge session."""
+        from src.core import server as bridge
+
+        async def _teed():
+            async for token in self.domain.generate(message):
+                if isinstance(token, str):
+                    bridge.put_token(sid, token)
+                yield token
+
+        try:
+            await self.renderer.render(_teed())
+        except Exception as e:
+            bridge.finish(sid, error=str(e))
+            raise
+        else:
+            bridge.finish(sid)
+
     async def _get_next_prompt(self, prompt_str: str) -> str:
         """Return the next user prompt, whether typed or spoken.
 
@@ -259,44 +286,66 @@ class AndrewCLI:
         self.domain.event_bus.dispatch = self._event_dispatch
         asyncio.create_task(self.domain.event_bus.start())
         while True:
-            prompt = f"[{self.domain_name}] Ask: "
-            user_input = await self._get_next_prompt(prompt)
+            prompt_str = f"[{self.domain_name}] Ask: "
+            stdin_task = asyncio.create_task(self._get_next_prompt(prompt_str))
+            bridge_task = asyncio.create_task(self._await_bridge())
+
+            done, pending = await asyncio.wait(
+                {stdin_task, bridge_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+            if bridge_task in done:
+                sid, user_input = bridge_task.result()
+                # Clear any partial typed input, then show the injected message.
+                sys.stdout.write(f"\r\033[K\033[36m[server] {user_input}\033[0m\n")
+                sys.stdout.flush()
+            else:
+                sid = None
+                user_input = stdin_task.result()
+
             if not user_input.strip():
+                if sid:
+                    from src.core import server as bridge
+                    bridge.finish(sid)
                 continue
+
             if user_input.startswith("/"):
                 cmd = user_input.strip()
                 bus = self.domain.event_bus
                 if cmd == "/events":
-                    sys.stdout.write(list_commands(bus.running()) + "\n")
-                    sys.stdout.flush()
-                    continue
-                if cmd.startswith("/stop"):
+                    response = list_commands(bus.running())
+                elif cmd.startswith("/stop"):
                     parts = cmd.split(None, 1)
                     if len(parts) == 1:
                         running = bus.running()
-                        msg = ("Running: " + ", ".join(running)) if running else "No events running."
-                        sys.stdout.write(msg + "\n")
+                        response = ("Running: " + ", ".join(running)) if running else "No events running."
                     elif bus.remove(parts[1]):
-                        sys.stdout.write(f"\033[33m✓ Event '{parts[1]}' stopped\033[0m\n")
+                        response = f"✓ Event '{parts[1]}' stopped"
                     else:
-                        sys.stdout.write(f"\033[31mNo running event named '{parts[1]}'\033[0m\n")
-                    sys.stdout.flush()
-                    continue
-                event = parse_slash_command(user_input)
-                if event is not None:
-                    bus.add(event)
-                    sys.stdout.write(
-                        f"\033[32m✓ Event '{event.name}' started\033[0m\n"
-                    )
-                    sys.stdout.flush()
-                    continue
-                sys.stdout.write(
-                    f"\033[31mUnknown command: {user_input}\033[0m\n"
-                    + list_commands(bus.running()) + "\n"
-                )
+                        response = f"No running event named '{parts[1]}'"
+                else:
+                    event = parse_slash_command(user_input)
+                    if event is not None:
+                        bus.add(event)
+                        response = f"✓ Event '{event.name}' started"
+                    else:
+                        response = f"Unknown command: {user_input}\n" + list_commands(bus.running())
+                sys.stdout.write(f"\033[32m{response}\033[0m\n")
                 sys.stdout.flush()
+                if sid:
+                    from src.core import server as bridge
+                    bridge.put_token(sid, response)
+                    bridge.finish(sid)
                 continue
-            await self._stream_response(user_input)
+
+            if sid:
+                await self._stream_response_bridged(sid, user_input)
+            else:
+                await self._stream_response(user_input)
 
 
 if __name__ == "__main__":

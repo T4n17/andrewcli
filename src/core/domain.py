@@ -11,7 +11,7 @@ from src.shared.config import Config
 log = logging.getLogger(__name__)
 
 
-def _make_router():
+def _make_router(api_base_url: str = None, model: str = None):
     """Pick the routing backend based on config, with safe fallback.
 
     - "embed": fastembed-based cosine similarity (default, fast).
@@ -31,7 +31,7 @@ def _make_router():
                 "installed (%s); falling back to the LLM router",
                 exc,
             )
-    return ToolRouter()
+    return ToolRouter(api_base_url=api_base_url, model=model)
 
 
 class Domain(ABC):
@@ -39,6 +39,8 @@ class Domain(ABC):
     tools: List = []
     skills: List = []
     events: List = []
+    model: str = None
+    api_base_url: str = None
     # When False, skip the router entirely and expose every declared
     # tool/skill to the LLM on every turn. Useful for domains where the
     # full toolset is always relevant (e.g. coding).
@@ -51,9 +53,9 @@ class Domain(ABC):
         self.tools = list(self.tools)
         self.skills = list(self.skills)
         self.events = list(self.events)
-        self.llm = LLM()
+        self.llm = LLM(api_base_url=self.api_base_url, model=self.model)
         self.llm.set_system_prompt(self.system_prompt)
-        self.router = _make_router()
+        self.router = _make_router(api_base_url=self.llm.api_base_url, model=self.llm.model)
         self.event_bus = EventBus(self.events)
 
         # Single "agent busy" lock. Both user turns (generate) and event
@@ -95,7 +97,7 @@ class Domain(ABC):
                     tools.append(tool)
                     existing_names.add(tool.name)
 
-            event_llm = LLM()
+            event_llm = LLM(api_base_url=self.llm.api_base_url, model=self.llm.model)
             event_llm.set_system_prompt(self.system_prompt)
             yield RouteEvent([item.name for item in tools + skills])
             async for token in event_llm.generate(prompt, tools, skills):

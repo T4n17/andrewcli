@@ -197,14 +197,24 @@ class TrayController:
         self._worker.error.connect(lambda _e: self._set_voice_busy(False))
         self._worker.start()
 
-    def _handle_slash_command(self, text: str) -> None:
-        """Parse and activate (or stop) a slash command from the panel."""
+    def _handle_slash_command(self, text: str, on_token=None) -> None:
+        """Parse and activate (or stop) a slash command from the panel.
+
+        ``on_token``, if provided, is called with each response string in
+        addition to the panel — used by ``_submit_bridge`` to capture the
+        response for the HTTP polling endpoint.
+        """
         from src.core.events_registry import parse_slash_command, list_commands
         bus = self.domain.event_bus
         cmd = text.strip()
 
+        def _emit(t: str) -> None:
+            self._panel.append_token(t)
+            if on_token is not None:
+                on_token(t)
+
         if cmd == "/events":
-            self._panel.append_token(list_commands(bus.running()))
+            _emit(list_commands(bus.running()))
             self._panel.on_stream_done()
             return
 
@@ -213,32 +223,66 @@ class TrayController:
             if len(parts) == 1:
                 running = bus.running()
                 msg = ("Running: " + ", ".join(running)) if running else "No events running."
-                self._panel.append_token(msg)
+                _emit(msg)
             else:
                 name = parts[1]
                 # remove() is sync but mutates list; safe from Qt thread
                 # since the bg loop only reads _events/_tasks, never writes.
                 if bus.remove(name):
-                    self._panel.append_token(f"Event **{name}** stopped.")
+                    _emit(f"Event **{name}** stopped.")
                 else:
-                    self._panel.append_token(f"No running event named `{name}`.")
+                    _emit(f"No running event named `{name}`.")
             self._panel.on_stream_done()
             return
 
         event = parse_slash_command(text)
         if event is None:
-            self._panel.on_error(
-                f"Unknown command: `{text}`\n\n" + list_commands(bus.running())
-            )
+            err = f"Unknown command: `{text}`\n\n" + list_commands(bus.running())
+            self._panel.on_error(err)
+            if on_token is not None:
+                on_token(err)
             return
         # EventBus.add() calls asyncio.create_task(), which must run on
         # the bg asyncio loop — schedule it thread-safely from Qt main.
         asyncio.run_coroutine_threadsafe(self._async_add_event(event), self._loop)
-        self._panel.append_token(f"Event **{event.name}** started.")
+        _emit(f"Event **{event.name}** started.")
         self._panel.on_stream_done()
 
     async def _async_add_event(self, event) -> None:
         self.domain.event_bus.add(event)
+
+    def _submit_bridge(self, sid: str, message: str) -> None:
+        """Process a server-injected message exactly like a user submission.
+
+        Shows the message as a user bubble, routes it through the normal
+        submit path, and captures response tokens into the bridge session
+        so the HTTP client can poll for them.
+        """
+        from src.core import server as bridge
+
+        self._panel.show_user_message(message)
+
+        if message.strip().startswith("/"):
+            captured: list[str] = []
+            self._handle_slash_command(message, on_token=captured.append)
+            bridge.put_token(sid, "".join(captured))
+            bridge.finish(sid)
+            return
+
+        self.stop()
+        self._set_voice_busy(True)
+        worker = StreamWorker(message, self.domain, tts=self.tts)
+        worker.token_received.connect(self._panel.append_token)
+        worker.token_received.connect(lambda t, _sid=sid: bridge.put_token(_sid, t))
+        worker.tool_status.connect(self._panel.on_tool_status)
+        worker.finished.connect(self._panel.on_stream_done)
+        worker.finished.connect(lambda _sid=sid: bridge.finish(_sid))
+        worker.finished.connect(lambda: self._set_voice_busy(False))
+        worker.error.connect(self._panel.on_error)
+        worker.error.connect(lambda e, _sid=sid: bridge.finish(_sid, error=e))
+        worker.error.connect(lambda _e: self._set_voice_busy(False))
+        self._worker = worker
+        worker.start()
 
     def stop(self) -> None:
         if self._worker and self._worker.isRunning():
@@ -503,6 +547,15 @@ class TrayController:
             # or the panel stays stuck on the "listening..." spinner.
             self._panel.show_user_message(item)
             self.submit(item)
+
+        # Bridge inbox: messages injected via the HTTP server.
+        from src.core import server as bridge
+        while not bridge.inbox.empty():
+            try:
+                sid, message = bridge.inbox.get_nowait()
+            except Exception:
+                break
+            self._submit_bridge(sid, message)
 
     # -- domain ---------------------------------------------------------------
 

@@ -68,10 +68,11 @@ class ProjectState(BaseModel):
     goal: str = ""
     constraints: list[str] = Field(default_factory=list)
     tasks: list[ProjectTask] = Field(default_factory=list)
+    log: list[str] = Field(default_factory=list)
 
-    @field_validator("constraints", mode="before")
+    @field_validator("constraints", "log", mode="before")
     @classmethod
-    def _coerce_constraints(cls, v):
+    def _coerce_str_list(cls, v):
         if v is None:
             return []
         if isinstance(v, str):
@@ -108,10 +109,13 @@ Write valid JSON using this exact schema (all keys are required):
   "tasks": [
     {{"id": 1, "title": "first task", "done": false}},
     {{"id": 2, "title": "second task", "done": false}}
-  ]
+  ],
+  "log": []
 }}
 
 No constraints? Use: `"constraints": []`
+Initialize `log` as an empty array — the system will require you to \
+append one entry per completed task. Do not pre-fill it.
 
 You may add extra fields (notes, observations, dependencies) at the top \
 level or inside task objects. These extra fields are your private scratchpad \
@@ -126,9 +130,10 @@ The system will dispatch task 1 on the next iteration.\
 _TASK_PROMPT = """\
 Project goal: {goal}
 {constraints_block}\
+{log_block}\
 Progress: {done}/{total} tasks complete.
 
-## Current state:
+## Current state — do NOT read `{state_file}`, use this JSON directly:
 
 ```json
 {canonical_json}
@@ -144,9 +149,10 @@ Do not call any verification tool more than once.
 ## When the task is done, follow these steps IN ORDER then stop:
 
   1. Write the updated JSON to `{state_file}` with task {task_id} \
-changed to `"done": true`.
-  2. Write one short paragraph describing what you did.
-  3. Write ONE sentence confirming what you did. Stop immediately after \
+changed to `"done": true` AND one new entry appended to `log` — a \
+single factual line describing what you did (file paths, key values, \
+decisions, errors encountered). Be concrete, not vague.
+  2. Write ONE sentence confirming what you did. Stop immediately after \
 that sentence — do not add more text, do not repeat yourself.
 
 ## WARNING — the only way to advance
@@ -160,6 +166,8 @@ task will repeat on the next iteration indefinitely.
 task order.
   • Do NOT add or remove tasks.
   • Do NOT redo tasks already marked [x] — they are permanently done.
+  • `log` is append-only — never remove or edit existing entries, only \
+add a new one at the end.
   • Task not yet complete (e.g. waiting for a condition)? Leave `done` \
 as false and describe what you observed. The loop will call you again.
   • You MAY add or update custom fields (notes, observed values, scratch \
@@ -170,9 +178,10 @@ verbatim every iteration as your private scratchpad.\
 _DONE_PROMPT = """\
 Project goal: {goal}
 {constraints_block}\
+{log_block}\
 ## Project complete — all {total} tasks done
 
-Final task list from `{state_file}`:
+Final task list:
 {task_list_block}
 Write ONE short paragraph (2-4 sentences): what was built and whether every \
 constraint above was honoured. Do not repeat yourself. Do not add extra \
@@ -208,6 +217,9 @@ class ProjectEvent(Event):
         # reconciled against it so the agent cannot drop the goal,
         # constraints, or task structure.
         self._snapshot: dict | None = None
+        # Monotonic log floor — only grows, never shrinks, so accidental
+        # truncation by the agent is silently undone on the next read.
+        self._log_floor: list[str] = []
 
         if not goal:
             # Resume mode: recover the goal from the existing state file.
@@ -285,6 +297,11 @@ class ProjectEvent(Event):
         self._snapshot["done_ids"].update(t.id for t in parsed.tasks if t.done)
         done_ids = self._snapshot["done_ids"]
 
+        # Monotonic log: take the longer of the in-memory floor and the disk
+        # value so accidental truncation by the agent is silently undone.
+        if len(parsed.log) > len(self._log_floor):
+            self._log_floor = list(parsed.log)
+
         # Carry through any custom scratchpad fields, both top-level and
         # per-task.
         disk_tasks_by_id = {t.id: t for t in parsed.tasks}
@@ -304,6 +321,7 @@ class ProjectEvent(Event):
             goal=self._snapshot["goal"],
             constraints=list(self._snapshot["constraints"]),
             tasks=reconciled_tasks,
+            log=list(self._log_floor),
             **state_extras,
         )
 
@@ -317,6 +335,13 @@ class ProjectEvent(Event):
             return ""
         bullets = "\n".join(f"  • {c}" for c in constraints)
         return f"Constraints (must hold throughout):\n{bullets}\n"
+
+    def _log_block(self, state: ProjectState | None) -> str:
+        entries = list(state.log) if state is not None else []
+        if not entries:
+            return ""
+        lines = "\n".join(f"  • {e}" for e in entries)
+        return f"## History of completed tasks\n{lines}\n\n"
 
     def _task_list_block(self, state: ProjectState | None, current_id=None) -> str:
         tasks = list(state.tasks) if state is not None else []
@@ -343,14 +368,15 @@ class ProjectEvent(Event):
         done = sum(1 for t in tasks if t.done)
         pending = [t for t in tasks if not t.done]
         constraints_block = self._constraints_block(state)
+        log_block = self._log_block(state)
 
         if not pending:
             self._summary_sent = True
             return _DONE_PROMPT.format(
                 goal=self.goal,
-                state_file=self.state_file,
                 total=total,
                 constraints_block=constraints_block,
+                log_block=log_block,
                 task_list_block=self._task_list_block(state),
             )
 
@@ -363,6 +389,7 @@ class ProjectEvent(Event):
             task_id=task.id,
             title=task.title,
             constraints_block=constraints_block,
+            log_block=log_block,
             canonical_json=state.model_dump_json(indent=2),
             task_list_block=self._task_list_block(state, current_id=task.id),
         )

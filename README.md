@@ -7,7 +7,7 @@ Local models degrade fast as context grows: reasoning gets muddier, tool calls g
 - **Rolling memory** — after each response, messages are trimmed to just the last exchange and replaced with a compact `~300-word` summary injected into the system prompt. Short exchanges are appended inline with no LLM call, and a dedicated `SUMMARY_MODEL` can be pointed at a smaller model for the background merges.
 - **Context-aware router** — before each generation, a local **sentence-embedding classifier** (fastembed, CPU-only) picks the tools and skills needed for the request in ~15 ms. A classic LLM-based router is available as a fallback. Irrelevant schemas never reach the generation prompt.
 
-Both modes (CLI and system tray) share the same core: same domains, same memory, same router, and the same `Domain.busy_lock` that serializes user turns and event dispatches identically on every surface.
+All three surfaces (CLI, system tray, and HTTP API) share the same core: same domains, same memory, same router, and the same `Domain.busy_lock` that serializes user turns and event dispatches identically on every surface. The CLI and tray automatically start the FastAPI server in a background thread on launch. The server is a **thin middleware** — it enqueues messages into a shared bridge and the CLI/tray processes them through the normal submit path, so slash commands, events, and the full domain pipeline all work over HTTP exactly as if the user typed them. Clients poll an endpoint for the response tokens.
 
 An optional **`--voice`** modifier adds wake-word speech-to-text and streaming text-to-speech to either mode. `andrewcli --voice` turns the CLI into a push-to-talk-or-type surface; `andrewcli --tray --voice` does the same for the tray. Voice I/O is additive — typing always works, and the spoken and typed paths produce identical conversation state.
 
@@ -25,6 +25,7 @@ AndrewCLI/
     │   ├── config.py               # Config class — loads config.yaml
     │   └── paths.py                # Centralized filesystem paths (PROJECT_ROOT, DATA_DIR, …)
     ├── core/
+    │   ├── server.py               # FastAPI middleware + shared bridge (inbox queue, session store)
     │   ├── domain.py               # Base Domain class (async generator, event bus, busy_lock)
     │   ├── event.py                # Event ABC + EventBus (add, remove, running, stop)
     │   ├── events_registry.py      # Event auto-discovery + /name [args] slash-command parsing
@@ -38,7 +39,8 @@ AndrewCLI/
     │   ├── timer.py                # TimerEvent — fires on a fixed interval
     │   ├── file.py                 # FileEvent — fires when a watched file is modified
     │   ├── project.py              # ProjectEvent — drives the agent through a multi-step project
-    │   └── loop.py                 # LoopEvent — drives a 'do X until Y' loop with exit criteria
+    │   ├── loop.py                 # LoopEvent — drives a 'do X until Y' loop with exit criteria
+    │   └── schedule.py             # ScheduleEvent — fires once at a specific datetime
     ├── ui/                         # CLI rendering layer
     │   ├── animations.py           # Spinner (async, dynamic status)
     │   ├── filter.py               # ThinkFilter — parses <think> tags for reasoning display
@@ -127,6 +129,8 @@ A centralized `Config` class (`src/shared/config.py`) loads `config.yaml` and ex
 
 A **Domain** groups a system prompt, a set of tools, a set of skills, and a list of events into a single persona. Defined as Python classes in `src/domains/`, loaded dynamically from `config.yaml`. The `generate()` method is an async generator that yields tokens as they stream in. Domains can be **switched at runtime** with TAB.
 
+Domains can optionally override the global LLM endpoint and model per-domain (see [Add a new Domain](#add-a-new-domain)).
+
 Each domain owns an `EventBus` instance built from its `events` list. The bus is started by the app layer alongside the main loop.
 
 ### Tools
@@ -179,6 +183,7 @@ If the event sets a `message` string, the `EventBus` automatically dispatches it
 | `FileEvent` | `/file [path] [poll_interval] [message]` | Fires when a watched file is modified |
 | `ProjectEvent` | `/project [goal] [state_file]` | Drives the agent through a multi-step project: plans on the first invocation, executes one task per invocation, stops when all tasks are marked done in `state_file`. Calling `/project` with no arguments resumes from the existing `state_file` (goal recovered from the file) |
 | `LoopEvent` | `/loop [goal] [max_iterations] [state_file]` | Drives a `do X until Y` loop: plans the action and exit criteria on the first invocation, performs the action once per iteration, stops when any exit criterion fires (or, if a positive `max_iterations` was set, when the cap is hit). `max_iterations` is optional and defaults to `0` (uncapped — runs until a criterion fires). Calling `/loop` with no arguments resumes from the existing `state_file` |
+| `ScheduleEvent` | `/schedule [message] [when]` | Fires once at a specific datetime (`dd-mm-yyyy-hh-mm`), sends `message` to the agent, then stops automatically |
 
 **Notification** — when an event fires, both surfaces are notified:
 - **CLI**: a colored banner (`◆ Event [name]`) is printed, followed by the agent's streamed response.
@@ -202,6 +207,7 @@ Events are activated at runtime via slash commands — no domain restart require
 /loop "Monitor oil price; stop if < $100" → LoopEvent(goal=...) — uncapped
 /loop "Poll /status until ready" 30   → LoopEvent(goal=..., max_iterations=30)
 /loop                                  → LoopEvent() — resume from loop_state.json
+/schedule "Run skill 1" 10-10-2026-11-30 → ScheduleEvent(message="Run skill 1", when=datetime(2026,10,10,11,30))
 ```
 
 Quoted strings with spaces are handled correctly (`shlex` tokenisation). Arguments are coerced to their annotated types (`float`, `int`, or `str`). Extra arguments beyond the declared parameters are ignored; missing optional parameters fall back to their defaults.
@@ -216,7 +222,7 @@ Quoted strings with spaces are handled correctly (`shlex` tokenisation). Argumen
 | `remove(name)` | Cancel and remove the event with the given name. Returns `True` if found. |
 | `running()` | Return a list of names of currently active (non-done) events. |
 
-**Server** — the FastAPI server exposes `GET /events` to list all registered event types with their parameter names. Slash commands sent to `/chat` or `/chat/stream` are handled as one-shot dispatches: the event's `message` is run through `generate_event()` and the response is returned. This lets external orchestration drive a `ProjectEvent` or `LoopEvent` across multiple API calls while the corresponding state file (`project_state.json` / `loop_state.json`) persists progress on disk between requests.
+**Server** — the FastAPI server (`src/core/server.py`) is a thin middleware: `POST /chat` enqueues the message into a shared bridge inbox and returns a `session_id`; the CLI/tray picks it up within 100 ms and processes it through the normal submit path — the same code path as a typed message, so slash commands and events work identically over HTTP. Response tokens are accumulated in a per-session store and returned via `GET /chat/{session_id}` (tokens are consumed on each call; poll until `done: true`). `GET /events` lists all registered event types with their parameter names.
 
 #### `ProjectEvent` — autonomous project loop
 
@@ -409,7 +415,9 @@ The entire I/O pipeline is non-blocking:
    | `MODEL` | `qwen3.5:9B` | Main chat model |
    | `SUMMARY_MODEL` | same as `MODEL` | Smaller model used for background memory summarization |
    | `ROUTER_EMBED_MODEL` | `paraphrase-multilingual-mpnet-base-v2` | Override the fastembed model used by `EmbeddingRouter` |
-   | `OPENAI_API_KEY` | — | API key (required even for local models) |
+   | `OPENAI_API_KEY` | `local` | API key — defaults to `"local"` for local servers that don't validate it |
+
+   `API_BASE_URL` and `MODEL` are global defaults. Individual domains can override either by declaring `api_base_url` and/or `model` as class attributes — the domain's values take precedence over the env vars for all LLM calls including routing and event dispatch (see [Add a new Domain](#add-a-new-domain)).
 
 3. **Configure `config.yaml`:**
 
@@ -466,24 +474,28 @@ The entire I/O pipeline is non-blocking:
 4. **Run:**
 
    ```bash
-   # CLI mode (default)
+   # CLI mode (default) — API server auto-starts on 0.0.0.0:8000
    python andrewcli.py
 
    # CLI with voice (type or say the wake word)
    python andrewcli.py --voice
 
-   # System tray GUI
+   # System tray GUI — API server auto-starts inside the tray subprocess
    python andrewcli.py --tray
 
    # Tray with voice (panel pops up on wake word)
    python andrewcli.py --tray --voice
 
-   # FastAPI server
+   # Custom API host/port (applies to the auto-started server in CLI and tray)
+   python andrewcli.py --host 127.0.0.1 --port 9000
+   python andrewcli.py --tray --host 127.0.0.1 --port 9000
+
+   # Standalone FastAPI server (no CLI or tray, server only)
    python andrewcli.py --server
    python andrewcli.py --server --host 127.0.0.1 --port 9000
    ```
 
-   `--voice` is a **modifier** — it augments whichever primary mode is active. `--tray` and `--server` remain mutually exclusive.
+   `--voice` is a **modifier** — it augments whichever primary mode is active. `--tray` and `--server` remain mutually exclusive. `--host` / `--port` control the API server in all modes.
 
 ---
 
@@ -550,8 +562,10 @@ No events currently running.
 
 Available slash commands:
   /file [path] [poll_interval] [message]
+  /loop [goal] [max_iterations] [state_file]
   /project [goal] [state_file]
-  /timer [interval]
+  /schedule [message] [when]
+  /timer [interval] [message]
   /events              — show this list
   /stop [name]         — stop a running event
 ```
@@ -567,6 +581,71 @@ Andrew is running (voice on - say 'hey_jarvis' or just type)...
 [general] Ask: 🎙 dimmi l'ora                        # transcribed utterance
 Andrew: Sono le diciassette e trenta.                # streams to stdout AND speaker
 [general] Ask:
+```
+
+---
+
+## API
+
+The FastAPI server starts automatically alongside the CLI and tray (default `http://0.0.0.0:8000`). Use `--host` / `--port` to change the address.
+
+The server is a **middleware**: it does not call the LLM directly. Instead it enqueues the message for the running CLI/tray and the client polls for response tokens. This means slash commands, events, and the full domain pipeline all work exactly as if the user typed the message.
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/chat` | Queue a message; returns `{"session_id": "..."}` (202) |
+| `GET` | `/chat/{session_id}` | Poll for new tokens — consumed per call; `done: true` when finished |
+| `DELETE` | `/chat/{session_id}` | Discard a session and its buffered tokens |
+| `GET` | `/events` | List available slash-command event types and their parameters |
+
+### curl examples
+
+**Send a message and poll for the response:**
+```bash
+# Enqueue — returns immediately with a session_id
+SID=$(curl -s -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Write hello.txt with the text Hello world"}' | jq -r .session_id)
+
+# Poll until done (tokens are consumed on each call)
+until curl -s http://localhost:8000/chat/$SID | tee /dev/stderr | jq -e '.done' > /dev/null; do
+  sleep 0.5
+done
+```
+
+**Fire a slash-command event:**
+```bash
+# Schedule a message for 06-05-2026 at 22:46
+SID=$(curl -s -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "/schedule \"Run daily summary\" 06-05-2026-22-46"}' | jq -r .session_id)
+
+# Confirm the event was registered
+curl -s http://localhost:8000/chat/$SID | jq .
+# → {"tokens":["✓ Event 'schedule' started"],"done":true,"error":null}
+# The event now runs natively inside the CLI/tray at the scheduled time.
+
+# Start a project loop
+SID=$(curl -s -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "/project \"Build a REST API in Python\""}' | jq -r .session_id)
+curl -s http://localhost:8000/chat/$SID | jq .
+
+# List available events
+curl -s http://localhost:8000/events | jq .
+
+# List running events (via the CLI/tray inbox)
+SID=$(curl -s -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "/events"}' | jq -r .session_id)
+curl -s http://localhost:8000/chat/$SID | jq .
+```
+
+**Discard a session:**
+```bash
+curl -s -X DELETE http://localhost:8000/chat/$SID | jq .
 ```
 
 ---
@@ -632,6 +711,18 @@ class ResearchDomain(Domain):
 ```
 
 Set `domain: "research"` in `config.yaml`. The file name must match the config value; the class must be named `<Name>Domain`.
+
+**Per-domain LLM** — add `api_base_url` and/or `model` class attributes to point a domain at a different endpoint or model than the global defaults. Both are optional and fall back to the `API_BASE_URL` / `MODEL` env vars when omitted:
+
+```python
+class ResearchDomain(Domain):
+    api_base_url: str = "http://localhost:11434/v1"  # different server
+    model: str = "llama3:8b"                         # different model
+    system_prompt: str = "You are a research assistant."
+    tools: list = []
+    skills: list = []
+    events: list = []
+```
 
 ### Add a new Event
 

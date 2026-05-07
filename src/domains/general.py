@@ -4,6 +4,8 @@ from src.tools.skills import SkillCompiler
 from src.skills.myskills import Example, CreateSkill
 
 class GeneralDomain(Domain):
+    api_base_url: str = "http://localhost:8080/v1"
+    model: str = "qwen-35b-q5"
     routing_enabled: bool = False
     system_prompt: str = (
         "You are a helpful assistant with access to tools. "

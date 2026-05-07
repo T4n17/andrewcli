@@ -45,14 +45,17 @@ def format_tool_status(event) -> str | None:
 
 
 class LLM:
-    def __init__(self):
-        self.api_base_url = os.getenv("API_BASE_URL", "http://localhost:8080/v1")
-        self.model = os.getenv("MODEL", "qwen3.5:9B")
+    def __init__(self, api_base_url: str = None, model: str = None):
+        self.api_base_url = api_base_url or os.getenv("API_BASE_URL", "http://localhost:8080/v1")
+        self.model = model or os.getenv("MODEL", "qwen3.5:9B")
         # Memory summarization is background work that doesn't need the
         # same capacity as the main chat model. Point SUMMARY_MODEL at a
         # smaller model on the same server to cut background load.
         self.summary_model = os.getenv("SUMMARY_MODEL", self.model)
-        self.client = openai.AsyncOpenAI(base_url=self.api_base_url)
+        self.client = openai.AsyncOpenAI(
+            base_url=self.api_base_url,
+            api_key=os.getenv("OPENAI_API_KEY", "local"),
+        )
         self.memory = Memory()
 
     def set_system_prompt(self, prompt: str):
@@ -79,7 +82,11 @@ class LLM:
                 kwargs = {"model": self.model, "messages": self.memory.get(), "stream": True}
                 if all_schemas:
                     kwargs["tools"] = all_schemas
-                stream = await self.client.chat.completions.create(**kwargs)
+                try:
+                    stream = await self.client.chat.completions.create(**kwargs)
+                except openai.APIConnectionError:
+                    yield "There was an error with the LLM endpoint. Check that the server is running and that API_BASE_URL is configured correctly."
+                    return
 
                 content = ""
                 tool_calls_accum = {}

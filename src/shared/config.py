@@ -31,12 +31,6 @@ class Config:
         self.tray_position = config.get("tray_position", "top-right")
         self.tray_opacity = self._parse_opacity(config.get("tray_opacity", "100%"))
 
-        # Routing backend: "embed" uses fastembed-based cosine similarity
-        # (fast, local, deterministic), "llm" uses the main LLM as a
-        # classifier (slow but can reason about ambiguous intent).
-        self.router_backend = config.get("router_backend", "embed")
-        self.router_threshold = float(config.get("router_threshold", 0.40))
-
         # Voice (src/voice/). All keys are optional; heavy deps are only
         # imported when SpeechToText / TextToSpeech are actually
         # constructed, so leaving voice disabled costs nothing.

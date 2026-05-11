@@ -38,7 +38,7 @@ from PyQt6.QtCore import QObject, QTimer
 
 from src.core.event import Event
 from src.core.llm import ToolEvent, RouteEvent, format_tool_status
-from src.core.registry import available_domains, load_domain
+from src.core.registry import available_domains, load_domain, parse_slash_command, list_commands
 from src.tray.worker import StreamWorker, get_event_loop
 
 if TYPE_CHECKING:
@@ -204,7 +204,6 @@ class TrayController:
         addition to the panel — used by ``_submit_bridge`` to capture the
         response for the HTTP polling endpoint.
         """
-        from src.core.events_registry import parse_slash_command, list_commands
         bus = self.domain.event_bus
         cmd = text.strip()
 
@@ -263,10 +262,34 @@ class TrayController:
         self._panel.show_user_message(message)
 
         if message.strip().startswith("/"):
-            captured: list[str] = []
-            self._handle_slash_command(message, on_token=captured.append)
-            bridge.put_token(sid, "".join(captured))
-            bridge.finish(sid)
+            import inspect
+            evt = parse_slash_command(message)
+            if evt is not None:
+                # Use getattr_static to avoid calling dynamic properties (e.g.
+                # LoopEvent.message is a @property with side effects — accessing
+                # it here would consume the first planning iteration before the
+                # EventBus can use it).
+                msg_descriptor = inspect.getattr_static(type(evt), 'message', None)
+                if isinstance(msg_descriptor, property):
+                    has_message = True  # dynamic message, don't call it
+                else:
+                    has_message = bool(evt.message)  # plain attribute, safe to read
+            else:
+                has_message = False
+
+            if evt is not None and has_message:
+                evt._bridge_sid = sid
+                asyncio.run_coroutine_threadsafe(self._async_add_event(evt), self._loop)
+                token = f"Event **{evt.name}** started."
+                self._panel.append_token(token)
+                self._panel.on_stream_done()
+                bridge.put_token(sid, token)
+                # session stays open; _event_dispatch will finish it when the event fires
+            else:
+                captured: list[str] = []
+                self._handle_slash_command(message, on_token=captured.append)
+                bridge.put_token(sid, "".join(captured))
+                bridge.finish(sid)
             return
 
         self.stop()
@@ -478,17 +501,32 @@ class TrayController:
     async def _event_dispatch(self, event: Event) -> None:
         if not event.message:
             return
-        # Pause voice for the duration of the event turn so the wake
-        # word can't retrigger mid-generation and TTS output from the
-        # reply doesn't bleed back in through the mic. This runs on
-        # the bg loop already, so we flip the state + refresh the gate
-        # synchronously (which also cancels any active listen_once).
+        from src.core import server as bridge
+        sid = getattr(event, "_bridge_sid", None)
+        # Consume the sid for this iteration only — multi-iteration events
+        # (LoopEvent, ProjectEvent) fire _event_dispatch repeatedly; each
+        # subsequent call gets no bridge session so it only renders to the UI.
+        if sid:
+            event._bridge_sid = None
         self._voice_agent_busy = True
         self._refresh_voice_gate_sync()
         try:
             async for token in self.domain.generate_event(event.message):
                 self._event_token_queue.put(token)
-            self._event_token_queue.put(None)  # sentinel: stream done
+                if sid and isinstance(token, str):
+                    bridge.put_token(sid, token)
+            self._event_token_queue.put(None)
+            if sid:
+                bridge.finish(sid)
+        except asyncio.CancelledError:
+            self._event_token_queue.put(None)
+            if sid:
+                bridge.finish(sid, error="Event stopped")
+            raise
+        except Exception as e:
+            if sid:
+                bridge.finish(sid, error=str(e))
+            raise
         finally:
             self._voice_agent_busy = False
             self._refresh_voice_gate_sync()

@@ -8,14 +8,6 @@ tray_platform: "xcb"
 tray_position: "bottom-right"
 tray_opacity: "80%"
 
-# Routing: "embed" (fast, local embedding classifier) or "llm" (uses MODEL)
-router_backend: "llm"
-# Cosine threshold above which a tool/skill is considered relevant.
-# Lower = more tools selected, higher = stricter matching.
-# Tuned for paraphrase-multilingual-mpnet-base-v2:
-#   chat/greetings score 0.25-0.40, real queries score 0.50-0.95
-router_threshold: 0.40
-
 # --- Voice (optional) --------------------------------------------------------
 # Set enabled: true once you've installed the voice extras
 # (faster-whisper, openwakeword, piper-tts, sounddevice).
@@ -34,7 +26,6 @@ voice:
   # STT language: "auto" or ISO code (e.g. "en", "it")
   stt_language: "it"
   # TTS engine:
-  #   "glados" - Custom ONNX GLaDOS voice (local, English-only, no install needed)
   #   "piper"  - Local ONNX VITS voices via piper-tts (multilingual, fast)
   #   "edge"   - Microsoft Azure Neural TTS (excellent quality, needs internet)
   tts_engine: "edge"

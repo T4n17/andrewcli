@@ -5,7 +5,7 @@ A lightweight, fully async Python agent — designed to **keep your context clea
 Local models degrade fast as context grows: reasoning gets muddier, tool calls go off the rails, and token budgets hit the ceiling. AndrewCLI fights this with two mechanisms that run on every turn:
 
 - **Rolling memory** — after each response, messages are trimmed to just the last exchange and replaced with a compact `~300-word` summary injected into the system prompt. Short exchanges are appended inline with no LLM call, and a dedicated `SUMMARY_MODEL` can be pointed at a smaller model for the background merges.
-- **Context-aware router** — before each generation, a local **sentence-embedding classifier** (fastembed, CPU-only) picks the tools and skills needed for the request in ~15 ms. A classic LLM-based router is available as a fallback. Irrelevant schemas never reach the generation prompt.
+- **Context-aware router** — before each generation, an LLM-based classifier picks only the tools and skills needed for the request. Irrelevant schemas never reach the generation prompt.
 
 All three surfaces (CLI, system tray, and HTTP API) share the same core: same domains, same memory, same router, and the same `Domain.busy_lock` that serializes user turns and event dispatches identically on every surface. The CLI and tray automatically start the FastAPI server in a background thread on launch. The server is a **thin middleware** — it enqueues messages into a shared bridge and the CLI/tray processes them through the normal submit path, so slash commands, events, and the full domain pipeline all work over HTTP exactly as if the user typed them. Clients poll an endpoint for the response tokens.
 
@@ -20,27 +20,34 @@ AndrewCLI/
 ├── andrewcli.py                    # Unified entry point (CLI, tray, server)
 ├── config.yaml                     # Configuration file
 ├── requirements.txt                # Python dependencies
+├── events/                         # Event definitions — auto-discovered, activated via /name
+│   ├── timer.py                    # TimerEvent — fires on a fixed interval
+│   ├── file.py                     # FileEvent — fires when a watched file is modified
+│   ├── project.py                  # ProjectEvent — drives the agent through a multi-step project
+│   ├── loop.py                     # LoopEvent — drives a 'do X until Y' loop with exit criteria
+│   └── schedule.py                 # ScheduleEvent — fires once at a specific datetime
+├── domains/                        # Each domain is a self-contained subpackage
+│   └── general/                    # — auto-discovered, no manual registration
+│       ├── domain.py               # GeneralDomain class
+│       ├── tools/                  # Tool subclasses auto-loaded from *.py
+│       │   └── common.py           #   WriteFile, ReadFile, ExecuteCommand, GetCurrentDate
+│       └── skills/                 # Skill markdown files auto-loaded as Skill instances
+│           ├── example.md          #   Example skill (template)
+│           └── create_new_skill.md #   SkillCompiler — scaffolds new skill markdown files
 └── src/
     ├── shared/
     │   ├── config.py               # Config class — loads config.yaml
-    │   └── paths.py                # Centralized filesystem paths (PROJECT_ROOT, DATA_DIR, …)
+    │   └── paths.py                # Centralized filesystem paths (PROJECT_ROOT, LAUNCH_DIR, DATA_DIR, …)
     ├── core/
     │   ├── server.py               # FastAPI middleware + shared bridge (inbox queue, session store)
     │   ├── domain.py               # Base Domain class (async generator, event bus, busy_lock)
     │   ├── event.py                # Event ABC + EventBus (add, remove, running, stop)
-    │   ├── events_registry.py      # Event auto-discovery + /name [args] slash-command parsing
     │   ├── llm.py                  # Async LLM client with streaming + tool-calling loop
     │   ├── memory.py               # Rolling memory with background summarization
-    │   ├── registry.py             # Domain discovery and dynamic loading
-    │   ├── router.py               # ToolRouter (LLM) + EmbeddingRouter (fastembed)
+    │   ├── registry.py             # Unified auto-discovery: domains, events (+ /slash parsing), tools, skills
+    │   ├── router.py               # ToolRouter — LLM-based tool/skill router
     │   ├── skill.py                # Base Skill class (markdown-defined tools)
     │   └── tool.py                 # Base Tool class — auto-generates OpenAI schemas from type hints
-    ├── events/                     # Event definitions — auto-discovered, activated via /name
-    │   ├── timer.py                # TimerEvent — fires on a fixed interval
-    │   ├── file.py                 # FileEvent — fires when a watched file is modified
-    │   ├── project.py              # ProjectEvent — drives the agent through a multi-step project
-    │   ├── loop.py                 # LoopEvent — drives a 'do X until Y' loop with exit criteria
-    │   └── schedule.py             # ScheduleEvent — fires once at a specific datetime
     ├── ui/                         # CLI rendering layer
     │   ├── animations.py           # Spinner (async, dynamic status)
     │   ├── filter.py               # ThinkFilter — parses <think> tags for reasoning display
@@ -48,31 +55,22 @@ AndrewCLI/
     ├── tray/                       # System tray GUI (PyQt6)
     │   ├── __main__.py             # Entry point for `python -m src.tray`
     │   ├── bootstrap.py            # Pre-Qt init (sets QT_QPA_PLATFORM from config)
-    │   ├── app.py                  # Orchestrator — domain loading, worker lifecycle, signals
+    │   ├── app.py                  # Thin shell — constructs TrayController and QApplication
+    │   ├── controller.py           # TrayController — domain loading, worker lifecycle, voice bridge, signals
     │   ├── worker.py               # StreamWorker QThread — runs domain.generate() on shared async loop
     │   ├── panel.py                # ChatPanel widget — input, streamed output, spinner, controls
     │   ├── icon.py                 # Tray icon and context menu
     │   ├── style.css               # Qt stylesheet (Catppuccin Mocha)
     │   └── md.css                  # CSS for markdown rendering in QTextBrowser
-    ├── voice/                      # Optional wake-word STT + streaming TTS
-    │   ├── __init__.py             # build_voice_io(config) factory — shared by CLI, tray, session
-    │   ├── stt.py                  # SpeechToText — openwakeword + faster-whisper + energy VAD
-    │   ├── hey_andrew.onnx         # Custom "hey Andrew" wake-word model (ONNX, used by default)
-    │   ├── hey_andrew.tflite       # Same model in TFLite format (training artefact, kept for reference)
-    │   ├── tts.py                  # TextToSpeech — Piper (local, fast, robotic)
-    │   ├── tts_edge.py             # EdgeTTS — Microsoft Azure Neural TTS (online, high-quality)
-    │   ├── sanitize.py             # strip_markdown — pre-render filter for the TTS tee path
-    │   └── session.py              # Stand-alone VoiceSession (library-level helper)
-    ├── tools/
-    │   ├── common.py               # WriteFile, ReadFile, ExecuteCommand, GetCurrentDate
-    │   └── skills.py               # SkillCompiler — scaffolds new skill markdown files
-    ├── skills/
-    │   ├── myskills.py             # Skill subclass definitions
-    │   └── skills_files/           # Skill instruction markdown files
-    └── domains/
-        ├── general.py              # General-purpose domain
-        ├── coding.py               # Coding-focused domain
-        └── experimental.py         # Shell-only domain (execute_command)
+    └── voice/                      # Optional wake-word STT + streaming TTS
+        ├── __init__.py             # build_voice_io(config) factory — shared by CLI, tray, session
+        ├── stt.py                  # SpeechToText — openwakeword + faster-whisper + energy VAD
+        ├── hey_andrew.onnx         # Custom "hey Andrew" wake-word model (ONNX, used by default)
+        ├── hey_andrew.tflite       # Same model in TFLite format (training artefact, kept for reference)
+        ├── tts.py                  # TextToSpeech — Piper (local, fast, robotic)
+        ├── tts_edge.py             # EdgeTTS — Microsoft Azure Neural TTS (online, high-quality)
+        ├── sanitize.py             # strip_markdown — pre-render filter for the TTS tee path
+        └── session.py              # Stand-alone VoiceSession (library-level helper)
 ```
 
 ---
@@ -94,28 +92,13 @@ The model always has prior context, but the message history never grows beyond o
 
 **Dedicated summary model** — summarization is background work that doesn't need the same capacity as the main chat model. Set the `SUMMARY_MODEL` env var (e.g. `qwen2.5-0.5b-instruct`) to route background merges to a smaller model on the same server. Defaults to `MODEL` when unset.
 
-**Storage:** `~/.andrewcli/data/memory.json`
+**Storage:** `$LAUNCH_DIR/.andrewcli/data/memory.json` — the data directory lives inside the folder you launched `andrewcli` from (same pattern as Claude Code / OpenCode), so different projects keep independent memory. Override by exporting `ANDREW_LAUNCH_DIR` before launching.
 
 ### Context-Aware Router
 
-Before each generation the active router selects a minimal tool/skill set. The generation call receives **only the selected schemas**, not the full catalog. A skill that requires specific tools can declare them in its YAML frontmatter — those are injected even if the router didn't select them. Any routing failure falls back to returning the full catalog so the LLM always has its tools.
+Before each generation the router selects a minimal tool/skill set. The generation call receives **only the selected schemas**, not the full catalog. A skill that requires specific tools can declare them in its YAML frontmatter — those are injected even if the router didn't select them. Any routing failure falls back to returning the full catalog so the LLM always has its tools.
 
-Two backends are available, both living in `src/core/router.py` with identical `route()` signatures. The active one is chosen via `router_backend` in `config.yaml`:
-
-| Backend | How it works | Latency | Dependencies |
-|---------|--------------|---------|--------------|
-| `"embed"` *(default)* | Local sentence-embedding model (`fastembed`, ONNX Runtime, CPU). The catalog is embedded once and cached; each query embedding is compared against it via cosine similarity. Matches above `router_threshold` are returned. | ~15 ms cold, **~0.1 ms cached** | `fastembed` |
-| `"llm"` | Classic LLM-as-classifier. Sends prompt + catalog + memory context to the chat model and parses the JSON array it replies with. | 0.5–2 s per turn | None extra |
-
-**Embedding router details**
-
-- Model: `sentence-transformers/paraphrase-multilingual-mpnet-base-v2` (~420 MB, 50+ languages). Override with `ROUTER_EMBED_MODEL`.
-- **Background warm-up** — `Domain.__init__` kicks off a daemon thread that downloads the model (first run only, to `~/.cache/fastembed`) and pre-embeds the full catalog, so the first real `route()` call hits a fully warm cache.
-- **Shared process-wide model cache** — multiple `Domain` instances or per-request routers on the server share one loaded model.
-- **32-entry LRU query cache** — retries, follow-ups, and near-duplicate prompts route in sub-millisecond time.
-- **Last exchange context** — the previous turn is prepended to the embedded query so follow-ups like "do it again" or "same thing for X" still route correctly.
-- **Graceful fallback** — if `fastembed` is missing or the model download fails, `Domain` falls back to the LLM router with a warning; if embedding ever errors at runtime, `route()` returns the full catalog (same safe behavior as the LLM router).
-- Threshold tuning — lower `router_threshold` for more recall (fewer missed intents), raise it for more precision (fewer spurious tools). On the shipped catalog, chat/greetings score 0.20–0.35 and real cross-lingual queries score 0.40–0.95, so `0.40` cleanly separates the two classes.
+`ToolRouter` (`src/core/router.py`) is an **LLM-as-classifier**: it sends the prompt, the current memory context (`summary` + `last_exchange`), and the full tool/skill catalog to the chat model and parses the JSON array it replies with. Costs 0.5–2 s per turn but handles ambiguous intent and natural-language follow-ups well. A domain can also opt out of routing entirely by setting `routing_enabled = False` — useful when the full toolset is always relevant (e.g. the coding domain).
 
 ---
 
@@ -127,21 +110,25 @@ A centralized `Config` class (`src/shared/config.py`) loads `config.yaml` and ex
 
 ### Domains
 
-A **Domain** groups a system prompt, a set of tools, a set of skills, and a list of events into a single persona. Defined as Python classes in `src/domains/`, loaded dynamically from `config.yaml`. The `generate()` method is an async generator that yields tokens as they stream in. Domains can be **switched at runtime** with TAB.
+A **Domain** is a self-contained subpackage under `domains/<name>/` that groups a system prompt, a set of tools, and a set of skills into a single persona. The `Domain` subclass itself is trivially small — `domains/<name>/domain.py` typically declares only `api_base_url`, `model`, and `routing_enabled`:
 
-Domains can optionally override the global LLM endpoint and model per-domain (see [Add a new Domain](#add-a-new-domain)).
+- **System prompt** — loaded from `domains/<name>/system_prompt.md` at construction time. Plain markdown, no frontmatter, no Python string concatenation. A class-level `system_prompt` attribute is still honored as a fallback for quick in-code experiments.
+- **Tools** — auto-discovered from `domains/<name>/tools/*.py` (every concrete `Tool` subclass is instantiated and registered).
+- **Skills** — auto-discovered from `domains/<name>/skills/*.md`.
 
-Each domain owns an `EventBus` instance built from its `events` list. The bus is started by the app layer alongside the main loop.
+The active domain is chosen from `config.yaml` (`domain: "general"`) and can be **switched at runtime** with TAB. Domains can optionally override the global LLM endpoint and model per-domain (see [Add a new Domain](#add-a-new-domain)).
+
+Each domain owns an `EventBus` instance that starts empty — events are independent of domains and are added at runtime through slash commands. The bus is started by the app layer alongside the main loop.
 
 ### Tools
 
 A **Tool** is a Python class the LLM can call. Tools auto-generate their OpenAI function schema from `execute()`'s type hints — no manual schema boilerplate. The base `Tool.run()` wrapper catches exceptions and returns a `[Tool Error]` string so the agent can recover without crashing.
 
-**Built-in tools** (`src/tools/common.py`): `WriteFile`, `ReadFile`, `ExecuteCommand`, `GetCurrentDate`
+**Built-in tools** (`domains/general/tools/`): `WriteFile`, `ReadFile`, `ExecuteCommand`, `GetCurrentDate`. Every shell command is spawned with `cwd=LAUNCH_DIR` so `execute_command` always targets the directory you launched `andrewcli` from, no matter where the interpreter's own cwd has drifted to.
 
 ### Skills
 
-A **Skill** is a markdown-defined tool. Instead of executing code, it returns natural-language instructions that the LLM follows using the available tools. Skill subclasses point to `.md` files in `src/skills/skills_files/` with YAML frontmatter:
+A **Skill** is a markdown-defined tool. Instead of executing code, it returns natural-language instructions that the LLM follows using the available tools. Skill files live directly inside each domain's `skills/` folder and are auto-loaded as `Skill` instances — no Python subclass needed. Each file starts with a YAML frontmatter block:
 
 ```markdown
 ---
@@ -161,7 +148,7 @@ When the LLM invokes a skill, its body is **promoted into the system prompt** as
 
 ### Events
 
-An **Event** is a self-contained background observer. Each event runs as an asyncio task inside the domain's `EventBus` and defines two things:
+An **Event** is a self-contained background observer. Each event runs as an asyncio task inside a domain's `EventBus` — which starts empty and is populated at runtime via slash commands (`/timer 30`, `/project "..."`) or the HTTP API. Events are decoupled from domain definitions: the same `events/` catalog is available from every domain. Each event defines two things:
 
 - **`condition()`** — an async coroutine that blocks until the triggering condition is met. It can be a sleep, a file-modification check, a queue wait, or any awaitable.
 - **`trigger()`** — called once `condition()` returns. Performs any side-effect needed before the agent message is sent.
@@ -175,7 +162,7 @@ If the event sets a `message` string, the `EventBus` automatically dispatches it
 - A timer event cannot pile up on itself — each event's `_run` loop awaits the full `condition → trigger → notify → dispatch` chain before re-arming.
 - The CLI and tray inherit identical behavior without per-surface locks.
 
-**Built-in events** (`src/events/`):
+**Built-in events** (`events/`):
 
 | Event | Slash command | Description |
 |-------|---------------|-------------|
@@ -212,7 +199,7 @@ Events are activated at runtime via slash commands — no domain restart require
 
 Quoted strings with spaces are handled correctly (`shlex` tokenisation). Arguments are coerced to their annotated types (`float`, `int`, or `str`). Extra arguments beyond the declared parameters are ignored; missing optional parameters fall back to their defaults.
 
-**Event auto-discovery** — every file dropped in `src/events/` that defines a concrete `Event` subclass with a `name` string attribute is automatically registered. No manual import or registration step needed. The registry (`src/core/events_registry.py`) is scanned at command parse time, so new events are available immediately after saving the file.
+**Event auto-discovery** — every file dropped in `events/` that defines a concrete `Event` subclass with a `name` string attribute is automatically registered. No manual import or registration step needed. The unified registry (`src/core/registry.py`) is scanned at command parse time, so new events are available immediately after saving the file.
 
 **`EventBus` API** — the bus exposes three methods alongside `start()` and `stop()`:
 
@@ -336,11 +323,7 @@ class MyEvent(Event):
         pass  # optional side-effect before the agent message
 ```
 
-Drop the file in `src/events/` — it is discovered automatically and immediately available as `/my_event [args]`. To pre-load events on domain start, add them to the domain's `events` list:
-
-```python
-events: list = [MyEvent()]
-```
+Drop the file in `events/` — it is discovered automatically and immediately available as `/my_event [args]`. Events are not tied to any domain; the same catalog works across every domain and is populated at runtime as the user types slash commands.
 
 ### UI Layer
 
@@ -350,10 +333,11 @@ events: list = [MyEvent()]
 
 ### Tray App
 
-A **PyQt6 system tray application** that uses the same domain classes and async logic as the CLI.
+A **PyQt6 system tray application** that uses the same domain classes and async logic as the CLI. `app.py` is a thin shell that constructs the `QApplication` and delegates all orchestration to `TrayController` (`controller.py`).
 
+- **`controller.py`** — `TrayController` handles domain loading, `StreamWorker` lifecycle, the event bridge, and voice integration. All voice state (`_voice_idle_event`, `_voice_user_enabled`, `_voice_agent_busy`) and the `_on_voice_toggle` handler live here.
 - **`worker.py`** — `StreamWorker` QThread runs `domain.generate()` on a shared asyncio event loop via `asyncio.run_coroutine_threadsafe`. Emits `token_received`, `tool_status`, `finished`, and `error` signals. Cancellation cancels the asyncio future and sets a flag checked during streaming.
-- **`panel.py`** — `ChatPanel` with a `QLineEdit` input, `QTextBrowser` for streamed markdown output, and header controls. Braille spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) driven by `QTimer` shows tool names during execution and routing. Conversation history is persisted to `~/.andrewcli/data/conversation.md` and restored on next launch.
+- **`panel.py`** — `ChatPanel` with a `QLineEdit` input, `QTextBrowser` for streamed markdown output, and header controls. Braille spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) driven by `QTimer` shows tool names during execution and routing. Conversation history is persisted to `$LAUNCH_DIR/.andrewcli/data/conversation.md` and restored on next launch.
 - **Event bridge** — the `EventBus` runs on the shared asyncio loop. A `queue.SimpleQueue` bridges it to the Qt main thread. A `QTimer` polling at 100 ms drains the queue, shows balloon notifications via `QSystemTrayIcon.showMessage`, and routes tokens to the panel — all without blocking the Qt event loop or the asyncio loop.
 - Submitting a new message while generating **cancels the previous generation** and waits before starting a new one.
 - **Multi-turn conversations** work because the domain instance (and its memory) persists across all turns.
@@ -371,7 +355,7 @@ Passing `--voice` to either the CLI or the tray adds a wake-word-triggered STT p
 - **CLI integration** — `_get_next_prompt` races the stdin reader against `stt.listen_once()`. Whichever fires first wins and the other is cancelled (termios is restored cleanly). Spoken prompts are echoed to the terminal with a `🎙 ` prefix so the log reads identically whether you typed or spoke. An `on_wake` callback overwrites the prompt line with `🎙 listening...` the instant the wake word fires, so there's visible feedback before you start speaking.
 - **Tray integration** — the tray drives `stt.listen_once` in a loop on the background asyncio loop (same one the `StreamWorker` uses for `domain.generate`, so token teeing stays lock-free). Three sentinels flow through a `queue.SimpleQueue` to the 100 ms Qt poller: `__wake__` swaps the status spinner to `🎙 listening...`, a non-empty transcript calls `ChatPanel.show_user_message(text)` + `_on_submit(text)` (producing the same conversation timeline as a typed submit), and `__idle__` (empty transcript — silence after wake or Whisper VAD filtered everything) resets the spinner so the panel never looks stuck on `listening...`.
 - **Two-state idle gate** — an `asyncio.Event` (`_voice_idle_event`, on the bg loop) is open iff `user_enabled AND NOT agent_busy`. Two independent flags feed it: `_voice_user_enabled` (flipped by the 🎙/🔇 toggle button in the panel header) and `_voice_agent_busy` (flipped at `_on_submit`/`_event_dispatch` start, cleared on `finished`/`error`/`_on_stop`). When the gate closes it also **cancels the currently-running `listen_once` task**, so the mic goes cold immediately instead of waiting for the next loop iteration — critical for preventing wake-word retrigger mid-turn and self-wake from the tray's own TTS playback bleeding into the mic.
-- **Mic toggle button** — a `● Voice` / `○ Voice` toggle in the panel header when `--voice` is active. Green + filled dot = listening; grey + hollow dot = paused. Click to flip; emits `ChatPanel.voice_toggle(bool)` wired to `AndrewTrayApp._on_voice_toggle`. Label is plain ASCII + Unicode bullet rather than a mic emoji so it stays visible on Linux boxes without a color-emoji font installed. The CLI is sequential by construction (`_get_next_prompt` only runs between turns) so it needs no equivalent gate or button.
+- **Mic toggle button** — a `● Voice` / `○ Voice` toggle in the panel header when `--voice` is active. Green + filled dot = listening; grey + hollow dot = paused. Click to flip; emits `ChatPanel.voice_toggle(bool)` wired to `TrayController._on_voice_toggle`. Label is plain ASCII + Unicode bullet rather than a mic emoji so it stays visible on Linux boxes without a color-emoji font installed. The CLI is sequential by construction (`_get_next_prompt` only runs between turns) so it needs no equivalent gate or button.
 
 ---
 
@@ -380,7 +364,7 @@ Passing `--voice` to either the CLI or the tray adds a wake-word-triggered STT p
 The entire I/O pipeline is non-blocking:
 
 1. **`andrewcli.py`** — runs under `asyncio.run()`. Input read via a custom async `_read_input()` using cbreak mode, supporting TAB and UP/DOWN history.
-2. **Router** — either a local embedding cosine-similarity match (default, ~15 ms or sub-ms cached) or an async LLM call, depending on `router_backend`.
+2. **Router** — async LLM-as-classifier call that returns the minimal tool/skill set for the prompt.
 3. **Spinner** — `asyncio` task that animates and updates status text from `RouteEvent` and `ToolEvent`s.
 4. **Streaming** — `LLM.generate()` is an async generator. Tokens are yielded as they arrive. `ToolEvent` objects are also yielded to update the spinner.
 5. **Tool calls** — accumulated from streamed chunks, executed via `tool.run()`, looped back automatically. Malformed JSON arguments are caught and reported instead of crashing.
@@ -393,7 +377,7 @@ The entire I/O pipeline is non-blocking:
 
 1. **Install the package:**
 
-   **Core (CLI, tray, server, embedding router):**
+   **Core (CLI, tray, server):**
 
    ```bash
    pip install -e .
@@ -405,7 +389,7 @@ The entire I/O pipeline is non-blocking:
    pip install -e ".[voice]"
    ```
 
-   After installation the `andrewcli` command is available system-wide. Models download automatically to `~/.cache/` on first use (Whisper ~500 MB for `small`, openwakeword ~15 MB, fastembed router ~420 MB).
+   After installation the `andrewcli` command is available system-wide. Voice models download automatically to `~/.cache/` on first use (Whisper ~500 MB for `small`, openwakeword ~15 MB).
 
 2. **Configure your LLM endpoint** via environment variables:
 
@@ -414,7 +398,6 @@ The entire I/O pipeline is non-blocking:
    | `API_BASE_URL` | `http://localhost:8080/v1` | OpenAI-compatible API URL |
    | `MODEL` | `qwen3.5:9B` | Main chat model |
    | `SUMMARY_MODEL` | same as `MODEL` | Smaller model used for background memory summarization |
-   | `ROUTER_EMBED_MODEL` | `paraphrase-multilingual-mpnet-base-v2` | Override the fastembed model used by `EmbeddingRouter` |
    | `OPENAI_API_KEY` | `local` | API key — defaults to `"local"` for local servers that don't validate it |
 
    `API_BASE_URL` and `MODEL` are global defaults. Individual domains can override either by declaring `api_base_url` and/or `model` as class attributes — the domain's values take precedence over the env vars for all LLM calls including routing and event dispatch (see [Add a new Domain](#add-a-new-domain)).
@@ -424,8 +407,6 @@ The entire I/O pipeline is non-blocking:
    ```yaml
    domain: "general"
    execute_bash_automatically: false
-   router_backend: "embed"
-   router_threshold: 0.40
    tray_width_compact: 500
    tray_height_compact: 80
    tray_width_expanded: 500
@@ -436,7 +417,8 @@ The entire I/O pipeline is non-blocking:
 
    # Voice I/O (only used with --voice; ignored otherwise).
    voice:
-     wake_word: "hey_jarvis"         # openwakeword built-in or path to .tflite/.onnx
+     enabled: false
+     wake_word: "hey_andrew"         # openwakeword built-in or path to .tflite/.onnx
      wake_threshold: 0.5
      stt_model: "small"              # faster-whisper: tiny / base / small / medium / large-v3
      stt_language: "it"              # "auto" or ISO code
@@ -449,10 +431,8 @@ The entire I/O pipeline is non-blocking:
 
    | Key | Default | Description |
    |-----|---------|-------------|
-   | `domain` | `"general"` | Active domain (matches filename in `src/domains/`) |
+   | `domain` | `"general"` | Active domain (matches the package name under `domains/`) |
    | `execute_bash_automatically` | `false` | Skip confirmation prompt for shell commands |
-   | `router_backend` | `"embed"` | Router backend: `"embed"` (fastembed cosine similarity, default) or `"llm"` (classic LLM classifier) |
-   | `router_threshold` | `0.40` | Cosine similarity threshold for `EmbeddingRouter`. Lower = more recall, higher = more precision |
    | `tray_width_compact` | `600` | Compact panel width (px) |
    | `tray_height_compact` | `80` | Compact panel height (px) |
    | `tray_width_expanded` | `900` | Expanded panel width (px) |
@@ -587,16 +567,18 @@ Andrew: Sono le diciassette e trenta.                # streams to stdout AND spe
 
 ## API
 
-The FastAPI server starts automatically alongside the CLI and tray (default `http://0.0.0.0:8000`). Use `--host` / `--port` to change the address.
+The FastAPI server starts automatically alongside the CLI and tray (default `http://0.0.0.0:8000`). Use `--host` / `--port` to change the address. It can also be started standalone (`--server`) to integrate external applications without a UI.
 
 The server is a **middleware**: it does not call the LLM directly. Instead it enqueues the message for the running CLI/tray and the client polls for response tokens. This means slash commands, events, and the full domain pipeline all work exactly as if the user typed the message.
+
+**Session lifecycle for events** — when a slash command starts an event that sends a message to the agent (e.g. `/schedule`, `/timer`, `/project`), the session stays open (`done: false`) until the event fires and the agent's response is fully streamed. The client polls the same `session_id` throughout and receives the agent's reply when the event triggers. Events without an agent message (e.g. side-effect-only triggers) close the session immediately after the confirmation token.
 
 ### Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/chat` | Queue a message; returns `{"session_id": "..."}` (202) |
-| `GET` | `/chat/{session_id}` | Poll for new tokens — consumed per call; `done: true` when finished |
+| `GET` | `/chat/{session_id}` | Poll for new tokens — consumed per call; `done: true` when the full response is ready |
 | `DELETE` | `/chat/{session_id}` | Discard a session and its buffered tokens |
 | `GET` | `/events` | List available slash-command event types and their parameters |
 
@@ -615,23 +597,30 @@ until curl -s http://localhost:8000/chat/$SID | tee /dev/stderr | jq -e '.done' 
 done
 ```
 
-**Fire a slash-command event:**
+**Fire a slash-command event and wait for the agent's response:**
 ```bash
 # Schedule a message for 06-05-2026 at 22:46
 SID=$(curl -s -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "/schedule \"Run daily summary\" 06-05-2026-22-46"}' | jq -r .session_id)
 
-# Confirm the event was registered
+# First poll — event registered, session still open
 curl -s http://localhost:8000/chat/$SID | jq .
-# → {"tokens":["✓ Event 'schedule' started"],"done":true,"error":null}
-# The event now runs natively inside the CLI/tray at the scheduled time.
+# → {"tokens":["Event schedule started."],"done":false,"error":null}
 
-# Start a project loop
+# Keep polling the same session_id — done: true arrives with the agent's
+# response when the event fires at the scheduled time.
+until curl -s http://localhost:8000/chat/$SID | tee /dev/stderr | jq -e '.done' > /dev/null; do
+  sleep 1
+done
+
+# Start a project loop (same pattern — session closes after each agent iteration)
 SID=$(curl -s -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "/project \"Build a REST API in Python\""}' | jq -r .session_id)
-curl -s http://localhost:8000/chat/$SID | jq .
+until curl -s http://localhost:8000/chat/$SID | tee /dev/stderr | jq -e '.done' > /dev/null; do
+  sleep 0.5
+done
 
 # List available events
 curl -s http://localhost:8000/events | jq .
@@ -652,65 +641,74 @@ curl -s -X DELETE http://localhost:8000/chat/$SID | jq .
 
 ## Extending
 
+Everything in AndrewCLI follows the same pattern: drop a file in the right folder and it is picked up at import time.
+
 ### Add a new Tool
 
-Create a class that inherits from `Tool` in `src/tools/`:
+Drop a `*.py` file into the target domain's tools folder, e.g. `domains/general/tools/weather.py`:
 
 ```python
 from src.core.tool import Tool
 
-class MyTool(Tool):
-    name: str = "my_tool"
-    description: str = "Does something useful."
+class GetWeather(Tool):
+    name: str = "get_weather"
+    description: str = "Fetch the current weather for a city."
 
-    def execute(self, arg1: str, arg2: int = 0) -> str:
-        return "result"
+    def execute(self, city: str, units: str = "metric") -> str:
+        return f"it's sunny in {city}"
 ```
 
-Import and add `MyTool()` to your domain's `tools` list.
+Every concrete `Tool` subclass declared in any `domains/<name>/tools/*.py` is instantiated automatically — no registration list to update. The OpenAI function-call schema is derived from the `execute()` signature and type hints.
 
 ### Add a new Skill
 
-1. Create a markdown file in `src/skills/skills_files/`:
+Drop a markdown file into the target domain's skills folder, e.g. `domains/general/skills/my_skill.md`:
 
-   ```markdown
-   ---
-   name: my_skill
-   description: What this skill does
-   tools: [tool_name_1, tool_name_2]
-   ---
+```markdown
+---
+name: my_skill
+description: What this skill does
+tools: [tool_name_1, tool_name_2]
+---
 
-   # Instructions
-   1. Step one
-   2. Step two
-   ```
+# Instructions
+1. Step one
+2. Step two
+```
 
-   `tools:` is optional — list any tools the skill requires that the router might not select automatically.
-
-2. Create a `Skill` subclass in `src/skills/myskills.py` and add it to your domain's `skills` list:
-
-   ```python
-   from src.core.skill import Skill
-
-   class MySkill(Skill):
-       skill_file: str = "my_skill.md"
-   ```
+`tools:` is optional — list any tools the skill requires that the router might not select automatically; they will be injected into the prompt whenever the skill is selected. No Python subclass is needed: the markdown file *is* the skill.
 
 ### Add a new Domain
 
-Create a file in `src/domains/` (e.g. `research.py`):
+Create a new subpackage under `domains/` (e.g. `domains/research/`):
+
+```
+domains/research/
+├── __init__.py            # empty
+├── domain.py              # ResearchDomain class
+├── system_prompt.md       # the prompt
+├── tools/                 # optional — auto-discovered *.py
+│   └── __init__.py
+└── skills/                # optional — auto-discovered *.md
+    └── __init__.py
+```
+
+`domain.py` only needs to declare the Python class (tools, skills, and the prompt are all loaded from the filesystem):
 
 ```python
 from src.core.domain import Domain
 
 class ResearchDomain(Domain):
-    system_prompt: str = "You are a research assistant."
-    tools: list = []
-    skills: list = []
-    events: list = []
+    pass
 ```
 
-Set `domain: "research"` in `config.yaml`. The file name must match the config value; the class must be named `<Name>Domain`.
+And `system_prompt.md`:
+
+```markdown
+You are a research assistant. Cite sources whenever possible.
+```
+
+Set `domain: "research"` in `config.yaml`. The folder name must match the config value; the class must be named `<Name>Domain`.
 
 **Per-domain LLM** — add `api_base_url` and/or `model` class attributes to point a domain at a different endpoint or model than the global defaults. Both are optional and fall back to the `API_BASE_URL` / `MODEL` env vars when omitted:
 
@@ -718,15 +716,12 @@ Set `domain: "research"` in `config.yaml`. The file name must match the config v
 class ResearchDomain(Domain):
     api_base_url: str = "http://localhost:11434/v1"  # different server
     model: str = "llama3:8b"                         # different model
-    system_prompt: str = "You are a research assistant."
-    tools: list = []
-    skills: list = []
-    events: list = []
+    routing_enabled: bool = False                    # expose every tool every turn
 ```
 
 ### Add a new Event
 
-Create a file in `src/events/` (e.g. `my_event.py`):
+Create a file in `events/` (e.g. `events/my_event.py`):
 
 ```python
 import asyncio
@@ -748,17 +743,11 @@ class MyEvent(Event):
         pass  # optional side-effect before the agent message
 ```
 
-The event is **auto-discovered** the moment the file is saved — no import or registration needed. Activate it at runtime:
+The event is **auto-discovered** the moment the file is saved — no import or registration needed. Activate it at runtime from any domain:
 
 ```
 /my_event hello          → MyEvent("hello")
 /my_event                → MyEvent()   (uses default)
 ```
 
-To pre-load it at domain start, add it to the `events` list:
-
-```python
-events: list = [MyEvent("hello")]
-```
-
-Events with a dynamic `message` property (computed from state rather than a fixed string) are supported — the `EventBus` reads `event.message` after `trigger()` returns, so the value can change between iterations. See `ProjectEvent` for an example.
+Events are decoupled from domains — the same catalog is available everywhere and is added to the running `EventBus` dynamically via `EventBus.add()`. Events with a dynamic `message` property (computed from state rather than a fixed string) are supported: the bus reads `event.message` after `trigger()` returns, so the value can change between iterations. See `ProjectEvent` for an example.

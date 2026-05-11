@@ -3,7 +3,7 @@
 Piper voices are tiny (~25 MB each), ONNX-based, near-realtime on CPU,
 and cover 30+ languages. Models live on Hugging Face at
 ``rhasspy/piper-voices``; we fetch them on first use via
-``huggingface_hub`` (already a transitive dep via fastembed).
+``huggingface_hub``.
 
 Voice names follow piper's own scheme: ``<lang>_<region>-<speaker>-<quality>``
 (e.g. ``en_US-amy-medium``, ``it_IT-riccardo-x_low``). The repo layout is
@@ -52,7 +52,7 @@ class TextToSpeech:
     # HuggingFace repo hosting all piper voices.
     HF_REPO = "rhasspy/piper-voices"
 
-    # Local cache for downloaded voice files. Parallels fastembed/whisper caches.
+    # Local cache for downloaded voice files. Parallels the whisper cache.
     CACHE_DIR = Path.home() / ".cache" / "andrewcli" / "piper"
 
     def __init__(

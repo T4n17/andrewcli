@@ -79,5 +79,9 @@ class StreamRenderer:
                 sys.stdout.write("\r\033[K")
             print()
         finally:
+            if self.spinner.is_running:
+                self.spinner.stop()
+                sys.stdout.write("\r\033[K")
+                sys.stdout.flush()
             termios.tcflush(fd, termios.TCIFLUSH)
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)

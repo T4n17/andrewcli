@@ -466,8 +466,8 @@ class SpeechToText:
         # Force ONNX backend. Reason: openwakeword's default is tflite,
         # which relies on tflite_runtime compiled against NumPy 1.x and
         # crashes hard ("_ARRAY_API not found") on NumPy >= 2. The ONNX
-        # path goes through onnxruntime (already pulled in by fastembed
-        # / faster-whisper) and is fully NumPy-2-compatible.
+        # path goes through onnxruntime (already pulled in by
+        # faster-whisper) and is fully NumPy-2-compatible.
         backend = "onnx"
 
         if wake_word in cls.BUILTIN_WAKE_WORDS:

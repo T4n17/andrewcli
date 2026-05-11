@@ -8,3 +8,31 @@ venv/
 .env
 andrewcli.egg-info
 __pycache__
+
+# Private voice engine
+src/voice/glados/
+src/voice/tts_glados.py
+
+# Private domains
+domains/experimental/
+domains/light/
+domains/setup/
+domains/uncensored/
+
+# Private tools
+domains/general/tools/google.py
+domains/general/tools/obsidian.py
+domains/general/tools/rss.py
+domains/general/tools/skill_compiler.py
+src/shared/google_scraper
+
+# Private skills
+domains/general/skills/find_best_price.md
+domains/general/skills/play_movie.md
+domains/general/skills/play_music.md
+domains/general/skills/usa_iran_war.md
+
+#Other
+proxy/
+bot/
+.andrewcli/

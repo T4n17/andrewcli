@@ -127,7 +127,7 @@ async def discard_endpoint(session_id: str):
 async def get_events():
     """List all available slash-command events."""
     import inspect
-    from src.core.events_registry import available_events
+    from src.core.registry import available_events
     registry = available_events()
     result = [
         {

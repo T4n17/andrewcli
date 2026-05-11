@@ -1,5 +1,4 @@
-from src.core.registry import available_domains, load_domain
-from src.core.events_registry import parse_slash_command, list_commands
+from src.core.registry import available_domains, load_domain, parse_slash_command, list_commands
 from src.shared.config import Config
 from src.ui.renderer import StreamRenderer
 import asyncio
@@ -172,12 +171,32 @@ class AndrewCLI:
             sys.stdout.flush()
 
     async def _event_dispatch(self, event):
-        # Domain.busy_lock serializes this with user turns and other events,
-        # so the event header and its streamed response cannot interleave
-        # with a concurrent response on the terminal.
         sys.stdout.write(f"\n\033[33m◆ Event [{event.name}]: {event.description}\033[0m\n")
         sys.stdout.flush()
-        await self.renderer.render(self.domain.generate_event(event.message))
+        from src.core import server as bridge
+        sid = getattr(event, "_bridge_sid", None)
+        if sid:
+            event._bridge_sid = None  # consume once; multi-iteration events reuse no session
+
+        async def _teed():
+            async for token in self.domain.generate_event(event.message):
+                if isinstance(token, str) and sid:
+                    bridge.put_token(sid, token)
+                yield token
+
+        try:
+            await self.renderer.render(_teed())
+        except asyncio.CancelledError:
+            if sid:
+                bridge.finish(sid, error="Event stopped")
+            raise
+        except Exception as e:
+            if sid:
+                bridge.finish(sid, error=str(e))
+            raise
+        else:
+            if sid:
+                bridge.finish(sid)
 
     async def _await_bridge(self) -> tuple[str, str]:
         """Block until a message arrives in the bridge inbox."""
@@ -316,6 +335,7 @@ class AndrewCLI:
             if user_input.startswith("/"):
                 cmd = user_input.strip()
                 bus = self.domain.event_bus
+                started_event = None
                 if cmd == "/events":
                     response = list_commands(bus.running())
                 elif cmd.startswith("/stop"):
@@ -328,10 +348,15 @@ class AndrewCLI:
                     else:
                         response = f"No running event named '{parts[1]}'"
                 else:
-                    event = parse_slash_command(user_input)
-                    if event is not None:
-                        bus.add(event)
-                        response = f"✓ Event '{event.name}' started"
+                    import inspect
+                    started_event = parse_slash_command(user_input)
+                    if started_event is not None:
+                        msg_descriptor = inspect.getattr_static(type(started_event), 'message', None)
+                        has_message = isinstance(msg_descriptor, property) or bool(started_event.message)
+                        if sid and has_message:
+                            started_event._bridge_sid = sid
+                        bus.add(started_event)
+                        response = f"✓ Event '{started_event.name}' started"
                     else:
                         response = f"Unknown command: {user_input}\n" + list_commands(bus.running())
                 sys.stdout.write(f"\033[32m{response}\033[0m\n")
@@ -339,7 +364,8 @@ class AndrewCLI:
                 if sid:
                     from src.core import server as bridge
                     bridge.put_token(sid, response)
-                    bridge.finish(sid)
+                    if not getattr(started_event, '_bridge_sid', None):
+                        bridge.finish(sid)
                 continue
 
             if sid:

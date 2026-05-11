@@ -1,7 +1,7 @@
 import re
+from pathlib import Path
 
 from src.core.tool import Tool
-from src.shared.paths import SKILLS_DIR
 
 
 # Match standard --- frontmatter --- body format with any surrounding whitespace.
@@ -9,17 +9,17 @@ _FRONTMATTER_RE = re.compile(r"^\s*---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 
 
 class Skill(Tool):
-    """A Skill is a Tool whose `execute()` returns scripted instructions.
+    """A Skill is a Tool whose ``execute()`` returns scripted instructions.
 
-    Each skill lives in a standalone markdown file under
-    `src/skills/skills_files/<name>.md` with a YAML-style frontmatter
-    describing its name, description, and the tools it relies on.
+    A skill is defined entirely by a markdown file with a YAML-style
+    frontmatter describing its ``name``, ``description``, and the
+    ``tools`` it relies on. Skill files live inside each domain's
+    ``skills/`` folder and are auto-discovered by
+    :func:`src.core.registry.available_skills`.
     """
 
-    skill_file: str
-
-    def __init__(self):
-        path = SKILLS_DIR / self.skill_file
+    def __init__(self, path: str | Path):
+        path = Path(path)
         try:
             content = path.read_text()
         except FileNotFoundError as exc:
@@ -47,6 +47,7 @@ class Skill(Tool):
                     f"Skill '{path}' is missing required frontmatter key '{required_key}'"
                 )
 
+        self.path = path
         self.name = meta["name"]
         self.description = meta["description"]
         self.instructions = body.strip()

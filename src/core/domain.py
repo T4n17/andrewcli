@@ -1,44 +1,21 @@
 import asyncio
+import inspect
 import logging
 from abc import ABC
-from typing import List
+from pathlib import Path
 
 from src.core.event import EventBus
 from src.core.llm import LLM, RouteEvent
-from src.core.router import EmbeddingRouter, ToolRouter
-from src.shared.config import Config
+from src.core.registry import available_skills, available_tools
+from src.core.router import ToolRouter
 
 log = logging.getLogger(__name__)
 
 
-def _make_router(api_base_url: str = None, model: str = None):
-    """Pick the routing backend based on config, with safe fallback.
-
-    - "embed": fastembed-based cosine similarity (default, fast).
-    - "llm":   classic LLM-as-classifier (slower, more flexible).
-
-    If fastembed is requested but not installed, we fall back to the
-    LLM router rather than crashing the whole app.
-    """
-    cfg = Config()
-    backend = getattr(cfg, "router_backend", "embed")
-    if backend == "embed":
-        try:
-            return EmbeddingRouter(threshold=getattr(cfg, "router_threshold", None))
-        except ImportError as exc:
-            log.warning(
-                "router_backend='embed' requested but fastembed is not "
-                "installed (%s); falling back to the LLM router",
-                exc,
-            )
-    return ToolRouter(api_base_url=api_base_url, model=model)
-
-
 class Domain(ABC):
+    # Fallback system prompt, used only when the domain folder doesn't
+    # ship a ``system_prompt.md``. New domains should prefer the file.
     system_prompt: str = ""
-    tools: List = []
-    skills: List = []
-    events: List = []
     model: str = None
     api_base_url: str = None
     # When False, skip the router entirely and expose every declared
@@ -47,16 +24,32 @@ class Domain(ABC):
     routing_enabled: bool = True
 
     def __init__(self):
-        # Copy class-level mutable attributes onto the instance so that
-        # two Domain instances (or subclasses declared with shared lists)
-        # cannot accidentally mutate each other's tool/skill/event state.
-        self.tools = list(self.tools)
-        self.skills = list(self.skills)
-        self.events = list(self.events)
+        # Autodiscover tools, skills, and the system prompt from this
+        # domain's own package folder. A subclass lives in
+        # ``domains/<name>/domain.py``, so:
+        #   - tools         come from ``domains/<name>/tools/*.py``
+        #   - skills        come from ``domains/<name>/skills/*.md``
+        #   - system_prompt comes from ``domains/<name>/system_prompt.md``
+        #     (falls back to the class-level ``system_prompt`` string if
+        #     no file is present, so quick experiments keep working).
+        domain_pkg = type(self).__module__.rsplit(".", 1)[0]
+        domain_file = inspect.getfile(type(self))
+        domain_dir = Path(domain_file).resolve().parent
+
+        self.tools = available_tools(f"{domain_pkg}.tools")
+        self.skills = available_skills(domain_dir / "skills")
+        self.system_prompt = self._load_system_prompt(domain_dir)
+
         self.llm = LLM(api_base_url=self.api_base_url, model=self.model)
         self.llm.set_system_prompt(self.system_prompt)
-        self.router = _make_router(api_base_url=self.llm.api_base_url, model=self.llm.model)
-        self.event_bus = EventBus(self.events)
+        self.router = ToolRouter(
+            api_base_url=self.llm.api_base_url,
+            model=self.llm.model,
+        )
+        # Events are independent of domains — they're registered
+        # dynamically via slash commands (``/timer 30`` etc.). The bus
+        # starts empty and picks them up through ``EventBus.add()``.
+        self.event_bus = EventBus()
 
         # Single "agent busy" lock. Both user turns (generate) and event
         # dispatches (generate_event) acquire it, so:
@@ -67,12 +60,21 @@ class Domain(ABC):
         # asyncio.Lock guarantees FIFO wake-up of waiters.
         self.busy_lock = asyncio.Lock()
 
-        # Embedding router benefits from background warm-up: downloads
-        # the model and pre-embeds the catalog while the user is still
-        # reading the UI, so the first real route() is instant.
-        warm = getattr(self.router, "warm", None)
-        if callable(warm):
-            warm(self.tools, self.skills)
+    def _load_system_prompt(self, domain_dir: Path) -> str:
+        """Return the prompt shipped in ``<domain_dir>/system_prompt.md``.
+
+        Falls back to the class-level ``system_prompt`` string when the
+        file is missing, so ad-hoc in-code domains still work. Trailing
+        whitespace is stripped so downstream prompt formatting doesn't
+        have to worry about a dangling newline.
+        """
+        prompt_file = domain_dir / "system_prompt.md"
+        if prompt_file.is_file():
+            try:
+                return prompt_file.read_text().strip()
+            except Exception:
+                log.exception("failed to read %s", prompt_file)
+        return self.system_prompt
 
     async def generate_event(self, prompt: str):
         """One-shot generation for event dispatches.

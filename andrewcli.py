@@ -34,7 +34,8 @@ def main():
     if args.voice:
         # Voice pipelines log through stdlib logging; configure it once.
         # Do this even in tray mode: the tray subprocess redirects stdout
-        # to ~/.andrewcli/tray.log so voice diagnostics land there.
+        # to $LAUNCH_DIR/.andrewcli/tray.log so voice diagnostics land
+        # there.
         import logging
         logging.basicConfig(
             level=logging.INFO,
@@ -48,25 +49,33 @@ def main():
         import os
         import subprocess
         import sys
-        log_path = os.path.expanduser("~/.andrewcli/tray.log")
+        # Anchor the tray to the directory the user launched from. The
+        # env var propagates through Popen so the child's
+        # ``src.shared.paths`` resolves the same LAUNCH_DIR even though
+        # the subprocess has its own Python interpreter.
+        launch_dir = os.path.abspath(os.getcwd())
+        log_path = os.path.join(launch_dir, ".andrewcli", "tray.log")
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         log = open(log_path, "a")
         cmd = [sys.executable, "-m", "src.tray"]
         if args.voice:
             cmd.append("--voice")
         cmd += ["--host", args.host, "--port", str(args.port)]
+        env = {**os.environ, "ANDREW_LAUNCH_DIR": launch_dir}
         subprocess.Popen(
             cmd,
             start_new_session=True,
             stdout=log,
             stderr=log,
+            cwd=launch_dir,
+            env=env,
         )
         print(f"Andrew tray started in background. Logs: {log_path}")
         print(f"API server will be available at http://{args.host}:{args.port}")
 
     elif args.server:
         import uvicorn
-        uvicorn.run("src.server:app", host=args.host, port=args.port)
+        uvicorn.run("src.core.server:app", host=args.host, port=args.port)
 
     else:
         from src.app import AndrewCLI

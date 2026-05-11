@@ -1,4 +1,5 @@
 from src.shared.config import Config
+from src.shared.paths import LAUNCH_DIR
 from datetime import datetime
 from src.core.tool import Tool
 
@@ -44,9 +45,14 @@ class ExecuteCommand(Tool):
                 answer = "n"
             if answer.strip().lower() != "y":
                 return "Command cancelled."
+        # Always spawn in the directory the user launched andrewcli
+        # from, not the interpreter's current cwd. That way a command
+        # like ``ls`` or ``git status`` always reflects the project
+        # the user opened andrewcli in.
         proc = subprocess.Popen(
             command, shell=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            cwd=str(LAUNCH_DIR),
         )
         try:
             stdout, stderr = proc.communicate(timeout=timeout)

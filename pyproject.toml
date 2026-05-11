@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "andrewcli"
 version = "0.1.0"
-description = "A lightweight, fully async Python agent with rolling memory and embedding-based routing"
+description = "A lightweight, fully async Python agent with rolling memory and LLM-based routing"
 license = { text = "GPL-3.0" }
 requires-python = ">=3.10"
 dependencies = [
@@ -17,7 +17,6 @@ dependencies = [
     "PyQt6",
     "selenium>=4.15.0",
     "mcp[cli]",
-    "fastembed",
     "httpx",
 ]
 
@@ -38,9 +37,9 @@ py-modules = ["andrewcli"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src*"]
+include = ["src*", "domains*", "events*"]
 
 [tool.setuptools.package-data]
-"src.skills" = ["skills_files/*.md"]
-"src.voice"  = ["*.onnx", "*.tflite"]
-"src.tray"   = ["*.css"]
+"domains"   = ["*/skills/*.md"]
+"src.voice" = ["*.onnx", "*.tflite"]
+"src.tray"  = ["*.css"]

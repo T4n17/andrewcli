@@ -30,7 +30,12 @@ class Event(ABC):
 
 
 class EventBus:
-    """Runs a list of Event instances as concurrent asyncio tasks.
+    """Runs a set of Event instances as concurrent asyncio tasks.
+
+    Events are independent of domains — the bus is created empty by
+    ``Domain.__init__`` and populated at runtime through
+    :py:meth:`add` (usually driven by user slash commands like
+    ``/timer 30``).
 
     Set `notify` and `dispatch` before calling `start()` — these are
     injected by the app layer so that each surface (CLI, tray) can handle
@@ -40,7 +45,7 @@ class EventBus:
         bus.dispatch = async (event: Event) -> None   — for agent response
 
     Typical usage from Domain:
-        self.event_bus = EventBus(self.events)
+        self.event_bus = EventBus()
 
     Then in the app before starting:
         self.domain.event_bus.notify  = self._on_event_notify
@@ -48,8 +53,8 @@ class EventBus:
         asyncio.create_task(self.domain.event_bus.start())
     """
 
-    def __init__(self, events: list[Event] = None):
-        self._events: list[Event] = events or []
+    def __init__(self, events: list[Event] | None = None):
+        self._events: list[Event] = list(events) if events else []
         self._tasks: list[asyncio.Task] = []
         self.notify: Callable[[Event], None] | None = None
         self.dispatch: Callable[[Event], Awaitable] | None = None

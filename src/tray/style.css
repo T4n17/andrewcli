@@ -142,13 +142,3 @@ QPushButton#MicBtn:hover {
     background: #a6e3a1;
     color: #1e1e2e;
 }
-
-QPushButton#MicBtn[voiceOn="false"] {
-    color: #6c7086;
-    border-color: #45475a;
-}
-
-QPushButton#MicBtn[voiceOn="false"]:hover {
-    background: #45475a;
-    color: #cdd6f4;
-}

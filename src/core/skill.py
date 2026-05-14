@@ -15,7 +15,7 @@ class Skill(Tool):
     frontmatter describing its ``name``, ``description``, and the
     ``tools`` it relies on. Skill files live inside each domain's
     ``skills/`` folder and are auto-discovered by
-    :func:`src.core.registry.available_skills`.
+    :py:meth:`src.core.registry.Registry.skills`.
     """
 
     def __init__(self, path: str | Path):

@@ -1,0 +1,30 @@
+domain: "general"
+api_base_url: "http://localhost:8080/v1"
+model: "qwen-35b-q5"
+routing_enabled: false
+
+# --- Rolling memory ---------------------------------------------------------
+# When enabled, AndrewCLI summarizes each turn into ~/.andrewcli/data/memory.json
+# and injects the running summary into the system prompt. Disable to give the
+# agent a clean slate every session (messages are still trimmed each turn so
+# the LLM context stays bounded).
+memory:
+  enabled: true
+  # Excerpt-length threshold (chars). Turns shorter than this are appended
+  # verbatim into the rolling summary; longer turns trigger an LLM merge call.
+  min_summary_chars: 200
+
+# --- HTTP bridge ------------------------------------------------------------
+# Auto-start the FastAPI server alongside the CLI/tray so external clients
+# can POST to /chat. Disable to keep the agent fully local. Has no effect
+# on `andrewcli --server`, which always starts the server explicitly.
+server:
+  enabled: false
+
+tray_width_compact: 500
+tray_height_compact: 80
+tray_width_expanded: 500 #900
+tray_height_expanded: 1000 #600
+tray_platform: "xcb"
+tray_position: "bottom-right"
+tray_opacity: "80%"

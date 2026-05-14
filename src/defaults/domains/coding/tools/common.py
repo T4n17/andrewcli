@@ -1,4 +1,3 @@
-from src.shared.config import Config
 from src.shared.paths import LAUNCH_DIR
 from datetime import datetime
 from src.core.tool import Tool
@@ -31,20 +30,8 @@ class ExecuteCommand(Tool):
     name: str = "execute_command"
     description: str = "Execute a bash shell command."
 
-    def __init__(self):
-        self.execute_bash_automatically = Config().execute_bash_automatically
-
     def execute(self, command: str, timeout: int = 10) -> str:
         import subprocess
-        if not self.execute_bash_automatically:
-            try:
-                answer = input(
-                    str(command) + "\nAre you sure you want to execute this command? (y/n): "
-                )
-            except EOFError:
-                answer = "n"
-            if answer.strip().lower() != "y":
-                return "Command cancelled."
         # Always spawn in the directory the user launched andrewcli
         # from, not the interpreter's current cwd. That way a command
         # like ``ls`` or ``git status`` always reflects the project

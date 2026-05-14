@@ -20,15 +20,6 @@ dependencies = [
     "httpx",
 ]
 
-[project.optional-dependencies]
-voice = [
-    "faster-whisper",
-    "openwakeword",
-    "sounddevice",
-    "edge-tts",
-    "piper-tts",
-]
-
 [project.scripts]
 andrewcli = "andrewcli:main"
 
@@ -37,9 +28,12 @@ py-modules = ["andrewcli"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src*", "domains*", "events*"]
+include = ["src*"]
 
 [tool.setuptools.package-data]
-"domains"   = ["*/skills/*.md"]
-"src.voice" = ["*.onnx", "*.tflite"]
+# Bundled defaults are seeded into ~/.config/andrewcli/ on first run
+# (see src/shared/paths.py::_seed_user_config). Ship every file under
+# src/defaults/ so domains, events, the global config.yaml, skills,
+# tools, and __init__.py markers all survive a regular pip install.
+"src" = ["defaults/**/*", "defaults/**/.*"]
 "src.tray"  = ["*.css"]

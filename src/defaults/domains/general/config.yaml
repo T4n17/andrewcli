@@ -1,0 +1,6 @@
+# Per-domain configuration. Any key set here overrides the matching key
+# from the global ~/.config/andrewcli/config.yaml when this domain is
+# active. Unspecified keys fall back to the global value.
+api_base_url: "http://localhost:8080/v1"
+model: "qwen-35b-q5"
+routing_enabled: false

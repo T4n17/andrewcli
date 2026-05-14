@@ -25,14 +25,10 @@ class StreamWorker(QThread):
     finished = pyqtSignal()
     error = pyqtSignal(str)
 
-    def __init__(self, message, domain, tts=None):
+    def __init__(self, message, domain):
         super().__init__()
         self.message = message
         self.domain = domain
-        # Optional TTS backend; when set, each text token is also fed
-        # into its sentence-level streaming queue so the chat panel
-        # and the speaker hear the same response simultaneously.
-        self.tts = tts
         self._future = None
         self._cancelled = False
 
@@ -53,51 +49,13 @@ class StreamWorker(QThread):
                 self.error.emit(str(e))
 
     async def _stream(self):
-        tts_queue = None
-        tts_task = None
-        if self.tts is not None:
-            from src.voice import strip_markdown
-            tts_queue = asyncio.Queue()
-
-            async def _feed():
-                while True:
-                    tok = await tts_queue.get()
-                    if tok is None:
-                        return
-                    yield tok
-
-            # Render markdown *before* TTS so the speaker doesn't say
-            # "asterisk asterisk bold asterisk asterisk"; strip_markdown
-            # is a stateful char-level filter that removes ``*_~`#``
-            # and elides ``(url)`` after a link ``]``.
-            tts_task = asyncio.create_task(
-                self.tts.speak_stream(strip_markdown(_feed()))
-            )
-
-        try:
-            async for token in self.domain.generate(self.message):
-                if self._cancelled:
-                    return
-                if isinstance(token, (RouteEvent, ToolEvent)):
-                    status = format_tool_status(token)
-                    if status is not None:
-                        self.tool_status.emit(status)
-                    continue
-                self.token_received.emit(token)
-                if tts_queue is not None:
-                    await tts_queue.put(token)
-        finally:
-            if tts_queue is not None:
-                await tts_queue.put(None)  # sentinel
-                if self._cancelled and self.tts is not None:
-                    # User hit Stop: kill the speaker mid-sentence.
-                    try:
-                        await self.tts.stop()
-                    except Exception:
-                        pass
-                if tts_task is not None:
-                    try:
-                        await tts_task
-                    except (asyncio.CancelledError, Exception):
-                        pass
+        async for token in self.domain.generate(self.message):
+            if self._cancelled:
+                return
+            if isinstance(token, (RouteEvent, ToolEvent)):
+                status = format_tool_status(token)
+                if status is not None:
+                    self.tool_status.emit(status)
+                continue
+            self.token_received.emit(token)
         self.finished.emit()

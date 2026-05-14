@@ -22,7 +22,32 @@ class Config:
             raise FileNotFoundError(f"config.yaml not found at {CONFIG_FILE}") from exc
 
         self.domain = config.get("domain", "general")
-        self.execute_bash_automatically = config.get("execute_bash_automatically", False)
+
+        # Optional global LLM defaults. A per-domain ``config.yaml`` can
+        # override these on a key-by-key basis; if neither layer sets a
+        # value the Domain class falls back to its own built-in default.
+        if "api_base_url" in config:
+            self.api_base_url = config.get("api_base_url")
+        if "model" in config:
+            self.model = config.get("model")
+        if "routing_enabled" in config:
+            self.routing_enabled = bool(config.get("routing_enabled"))
+        # Rolling memory (src/core/memory.py). Disabling switches off
+        # both the persistent ``memory.json`` summary and the in-prompt
+        # ``<memory>`` block; messages are still trimmed every turn so
+        # the LLM context stays bounded.
+        memory = config.get("memory", {}) or {}
+        self.memory_enabled = bool(memory.get("enabled", True))
+        self.memory_min_summary_chars = int(memory.get("min_summary_chars", 200))
+
+        # FastAPI bridge (src/core/server.py). When enabled, the CLI
+        # and tray auto-start the HTTP server in a background thread so
+        # external clients can submit prompts via /chat. The explicit
+        # ``andrewcli --server`` mode always starts regardless of this
+        # flag — it's the user's intent, not a side effect.
+        server = config.get("server", {}) or {}
+        self.server_enabled = bool(server.get("enabled", True))
+
         self.tray_width_compact = config.get("tray_width_compact", 600)
         self.tray_height_compact = config.get("tray_height_compact", 80)
         self.tray_width_expanded = config.get("tray_width_expanded", 900)
@@ -30,21 +55,6 @@ class Config:
         self.tray_platform = config.get("tray_platform", "")
         self.tray_position = config.get("tray_position", "top-right")
         self.tray_opacity = self._parse_opacity(config.get("tray_opacity", "100%"))
-
-        # Voice (src/voice/). All keys are optional; heavy deps are only
-        # imported when SpeechToText / TextToSpeech are actually
-        # constructed, so leaving voice disabled costs nothing.
-        voice = config.get("voice", {}) or {}
-        self.voice_enabled = bool(voice.get("enabled", False))
-        self.voice_wake_word = voice.get("wake_word", "hey_jarvis")
-        self.voice_wake_threshold = float(voice.get("wake_threshold", 0.5))
-        self.voice_stt_model = voice.get("stt_model", "small")
-        self.voice_stt_language = voice.get("stt_language", "auto")
-        self.voice_tts_engine = voice.get("tts_engine", "piper")  # "piper" | "edge" | "glados"
-        self.voice_tts_voice = voice.get("tts_voice", "en_US-amy-medium")
-        self.voice_tts_speed = float(voice.get("tts_speed", 1.0))
-        self.voice_input_device = voice.get("input_device")   # None = default
-        self.voice_output_device = voice.get("output_device")  # None = default
 
     @staticmethod
     def _parse_opacity(value):

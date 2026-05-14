@@ -8,10 +8,10 @@ This module's only job is the standalone-process concerns:
 * surface event notifications as tray balloons,
 * call ``app.exec()`` and propagate the exit code.
 
-All chat-orchestration, voice gating, event-bus bridging, and
-:class:`StreamWorker` lifecycle live in :class:`TrayController` so they
-can be reused by other shells (e.g. a desktop-widget host) that embed
-:class:`ChatPanel` as a child widget.
+All chat-orchestration, event-bus bridging, and :class:`StreamWorker`
+lifecycle live in :class:`TrayController` so they can be reused by other
+shells (e.g. a desktop-widget host) that embed :class:`ChatPanel` as a
+child widget.
 """
 import sys
 from pathlib import Path
@@ -30,7 +30,7 @@ from src.tray.worker import StreamWorker  # noqa: F401
 class AndrewTrayApp:
     """Thin shell: owns the QApplication + tray icon + ChatPanel window."""
 
-    def __init__(self, voice_enabled: bool = False):
+    def __init__(self):
         self.app = QApplication(sys.argv)
         self.app.setQuitOnLastWindowClosed(False)
         self.app.setStyleSheet(self._load_stylesheet())
@@ -43,7 +43,6 @@ class AndrewTrayApp:
         self.controller = TrayController(
             panel=self.panel,
             config=self._config,
-            voice_enabled=voice_enabled,
             parent=self.app,
             on_event_notification=self._on_event_notification,
         )
@@ -84,9 +83,8 @@ class AndrewTrayApp:
         self.panel.toggle()
 
     def _quit(self):
-        # Tear down the controller first (stops poll timer, voice
-        # listener, worker, event bus) so background tasks can't fire
-        # callbacks on a dying QApplication.
+        # Tear down the controller first (stops poll timer, worker, event
+        # bus) so background tasks can't fire callbacks on a dying QApplication.
         self.controller.shutdown()
         self.app.quit()
 
@@ -97,8 +95,8 @@ class AndrewTrayApp:
         sys.exit(self.app.exec())
 
 
-def main(voice_enabled: bool = False):
-    app = AndrewTrayApp(voice_enabled=voice_enabled)
+def main():
+    app = AndrewTrayApp()
     app.run()
 
 

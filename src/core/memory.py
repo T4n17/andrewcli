@@ -3,16 +3,16 @@ import json
 import logging
 import time
 
+from src.shared.config import Config
 from src.shared.paths import DATA_DIR
 
 log = logging.getLogger(__name__)
 
 MEMORY_FILE = DATA_DIR / "memory.json"
 
-# Skip the LLM merge call when the turn produced less than this much
-# combined text. Short exchanges (greetings, one-word answers) aren't
-# worth a full summarization request - we just append them verbatim.
-# ~200 chars ≈ ~40 tokens, which matches the "short turn" heuristic.
+# Default threshold below which summarization is skipped and the turn
+# is appended verbatim. Overridable via ``memory.min_summary_chars`` in
+# ``~/.config/andrewcli/config.yaml``. ~200 chars ≈ ~40 tokens.
 MIN_SUMMARY_CHARS = 200
 
 MERGE_SYSTEM_PROMPT = (
@@ -24,9 +24,16 @@ MERGE_SYSTEM_PROMPT = (
 
 class Memory:
     def __init__(self):
+        cfg = Config()
+        self.enabled = cfg.memory_enabled
+        self.min_summary_chars = cfg.memory_min_summary_chars
+
         self.system_prompt = None
         self.messages = []
-        self.summary = self._load_summary()
+        # When memory is off we don't read the persisted summary either,
+        # so toggling enabled=false effectively gives the agent a clean
+        # slate without having to delete ``memory.json`` by hand.
+        self.summary = self._load_summary() if self.enabled else ""
         self.last_exchange = ""
         self._trimmed = False
         self._merge_task = None
@@ -95,12 +102,17 @@ class Memory:
         if not excerpt:
             return
 
+        # Always trim — even when memory is off — so the message list
+        # doesn't grow without bound across turns. The summary block is
+        # simply not generated/persisted when disabled.
         self._trim_messages()
+        if not self.enabled:
+            return
 
         # Bonus optimization: for short turns (greetings, one-liners,
         # quick confirmations) the LLM merge is overkill. Append the
         # excerpt to the summary verbatim with a rolling window.
-        if len(excerpt) < MIN_SUMMARY_CHARS:
+        if len(excerpt) < self.min_summary_chars:
             combined = f"{self.summary}\n{excerpt}" if self.summary else excerpt
             self.summary = combined[-2000:]
             self._save_summary()

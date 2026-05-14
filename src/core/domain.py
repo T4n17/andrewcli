@@ -1,44 +1,64 @@
 import asyncio
-import inspect
+import importlib
 import logging
-from abc import ABC
+import sys
 from pathlib import Path
+
+import yaml
 
 from src.core.event import EventBus
 from src.core.llm import LLM, RouteEvent
-from src.core.registry import available_skills, available_tools
+from src.core.registry import registry
 from src.core.router import ToolRouter
+from src.shared.paths import DOMAINS_DIR
 
 log = logging.getLogger(__name__)
 
 
-class Domain(ABC):
-    # Fallback system prompt, used only when the domain folder doesn't
-    # ship a ``system_prompt.md``. New domains should prefer the file.
-    system_prompt: str = ""
-    model: str = None
-    api_base_url: str = None
-    # When False, skip the router entirely and expose every declared
-    # tool/skill to the LLM on every turn. Useful for domains where the
-    # full toolset is always relevant (e.g. coding).
+# Keys a per-domain ``config.yaml`` may set to override the global config
+# when this domain is active. Anything outside this set is ignored at the
+# Domain layer (it may still be honored by other consumers if they
+# explicitly read the per-domain file).
+_DOMAIN_OVERRIDE_KEYS = ("api_base_url", "model", "routing_enabled")
+
+
+class Domain:
+    """Runtime-configurable agent domain.
+
+    A domain is just a folder under ``~/.config/andrewcli/domains/<name>/``
+    containing:
+
+    * ``config.yaml``      — optional, overrides global settings
+                             (``api_base_url``, ``model``,
+                             ``routing_enabled``). Missing or empty
+                             means "inherit everything from global".
+    * ``system_prompt.md`` — optional, system prompt text.
+    * ``tools/*.py``       — optional, :class:`Tool` subclasses.
+    * ``skills/*.md``      — optional, frontmatter-driven skills.
+
+    There is no longer a per-domain Python class: the same ``Domain``
+    instance is reused for every domain, parametrised by ``name``.
+    """
+
+    # Defaults applied when neither the per-domain ``config.yaml`` nor
+    # the global ``config.yaml`` set a value. ``None`` for url/model
+    # leaves :class:`LLM` to fall back to its own built-in defaults.
+    api_base_url: str | None = None
+    model: str | None = None
     routing_enabled: bool = True
+    system_prompt: str = ""
 
-    def __init__(self):
-        # Autodiscover tools, skills, and the system prompt from this
-        # domain's own package folder. A subclass lives in
-        # ``domains/<name>/domain.py``, so:
-        #   - tools         come from ``domains/<name>/tools/*.py``
-        #   - skills        come from ``domains/<name>/skills/*.md``
-        #   - system_prompt comes from ``domains/<name>/system_prompt.md``
-        #     (falls back to the class-level ``system_prompt`` string if
-        #     no file is present, so quick experiments keep working).
-        domain_pkg = type(self).__module__.rsplit(".", 1)[0]
-        domain_file = inspect.getfile(type(self))
-        domain_dir = Path(domain_file).resolve().parent
+    def __init__(self, name: str):
+        self.name = name
+        self._domain_dir = (DOMAINS_DIR / name).resolve()
+        if not self._domain_dir.is_dir():
+            raise ValueError(f"Domain '{name}' not found at {self._domain_dir}")
 
-        self.tools = available_tools(f"{domain_pkg}.tools")
-        self.skills = available_skills(domain_dir / "skills")
-        self.system_prompt = self._load_system_prompt(domain_dir)
+        self._apply_config(self._load_domain_config())
+        self.system_prompt = self._load_system_prompt(self._domain_dir)
+
+        self.tools = registry.tools(f"domains.{name}.tools")
+        self.skills = registry.skills(self._domain_dir / "skills")
 
         self.llm = LLM(api_base_url=self.api_base_url, model=self.model)
         self.llm.set_system_prompt(self.system_prompt)
@@ -60,13 +80,45 @@ class Domain(ABC):
         # asyncio.Lock guarantees FIFO wake-up of waiters.
         self.busy_lock = asyncio.Lock()
 
+    # ------------------------------------------------------------------
+    # Config loading
+    # ------------------------------------------------------------------
+
+    def _load_domain_config(self) -> dict:
+        """Return the parsed per-domain ``config.yaml`` (empty if absent)."""
+        path = self._domain_dir / "config.yaml"
+        if not path.is_file():
+            return {}
+        try:
+            with open(path, "r") as f:
+                return yaml.safe_load(f) or {}
+        except Exception:
+            log.exception("failed to read %s", path)
+            return {}
+
+    def _apply_config(self, domain_cfg: dict) -> None:
+        """Apply the per-domain config on top of the global Config defaults.
+
+        Per-domain values win; otherwise the same key on the global
+        :class:`~src.shared.config.Config` is consulted; otherwise the
+        class-level default sticks.
+        """
+        from src.shared.config import Config  # local import: avoid cycles
+        global_cfg = Config()
+        for key in _DOMAIN_OVERRIDE_KEYS:
+            if key in domain_cfg and domain_cfg[key] is not None:
+                setattr(self, key, domain_cfg[key])
+            elif hasattr(global_cfg, key):
+                setattr(self, key, getattr(global_cfg, key))
+            # else: keep the class-level default
+
     def _load_system_prompt(self, domain_dir: Path) -> str:
         """Return the prompt shipped in ``<domain_dir>/system_prompt.md``.
 
         Falls back to the class-level ``system_prompt`` string when the
-        file is missing, so ad-hoc in-code domains still work. Trailing
-        whitespace is stripped so downstream prompt formatting doesn't
-        have to worry about a dangling newline.
+        file is missing. Trailing whitespace is stripped so downstream
+        prompt formatting doesn't have to worry about a dangling
+        newline.
         """
         prompt_file = domain_dir / "system_prompt.md"
         if prompt_file.is_file():
@@ -75,6 +127,60 @@ class Domain(ABC):
             except Exception:
                 log.exception("failed to read %s", prompt_file)
         return self.system_prompt
+
+    # ------------------------------------------------------------------
+    # Hot reload
+    # ------------------------------------------------------------------
+
+    def reload(self) -> None:
+        """Reload tools, skills, system prompt, and config from disk.
+
+        Called before each user turn so runtime edits take effect immediately:
+        add/remove/edit a skill file, edit a tool module, flip routing_enabled,
+        change api_base_url or model in config.yaml, update system_prompt.md.
+
+        Memory and the event bus are left untouched.
+        """
+        domain_dir = self._domain_dir
+        tools_pkg = f"domains.{self.name}.tools"
+
+        # Reload all already-imported tool modules so in-place edits are picked up.
+        try:
+            pkg_mod = sys.modules.get(tools_pkg)
+            if pkg_mod and getattr(pkg_mod, "__file__", None):
+                pkg_path = Path(pkg_mod.__file__).parent
+                for path in sorted(pkg_path.glob("*.py")):
+                    if path.stem == "__init__":
+                        continue
+                    mod_name = f"{tools_pkg}.{path.stem}"
+                    if mod_name in sys.modules:
+                        importlib.reload(sys.modules[mod_name])
+        except Exception:
+            log.exception("domain reload: failed to reload tool modules")
+
+        # Re-discover tools and skills from disk (picks up added/removed files).
+        self.tools = registry.tools(tools_pkg)
+        self.skills = registry.skills(domain_dir / "skills")
+
+        # Reload system prompt if the file changed.
+        new_prompt = self._load_system_prompt(domain_dir)
+        if new_prompt != self.system_prompt:
+            self.system_prompt = new_prompt
+            self.llm.set_system_prompt(new_prompt)
+
+        # Re-read the per-domain config.yaml so model/api/routing edits
+        # take effect on the next turn without a restart.
+        old_api, old_model = self.api_base_url, self.model
+        self._apply_config(self._load_domain_config())
+        if self.api_base_url != old_api or self.model != old_model:
+            old_memory = self.llm.memory
+            self.llm = LLM(api_base_url=self.api_base_url, model=self.model)
+            self.llm.memory = old_memory
+            self.llm.set_system_prompt(self.system_prompt)
+            self.router = ToolRouter(
+                api_base_url=self.llm.api_base_url,
+                model=self.llm.model,
+            )
 
     async def generate_event(self, prompt: str):
         """One-shot generation for event dispatches.
@@ -110,6 +216,7 @@ class Domain(ABC):
         # event dispatch until this generator is fully consumed (or
         # closed early via aclose()). See `busy_lock` docstring.
         async with self.busy_lock:
+            self.reload()
             if self.routing_enabled:
                 tools, skills = await self.router.route(
                     prompt, self.tools, self.skills,

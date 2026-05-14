@@ -1,5 +1,5 @@
+import asyncio
 import os
-import select
 import sys
 import termios
 import tty
@@ -13,37 +13,19 @@ class StreamRenderer:
     def __init__(self):
         self.spinner = Spinner()
 
-    def _check_esc(self, fd):
-        if select.select([sys.stdin], [], [], 0)[0]:
-            ch = os.read(fd, 1)
-            if ch == b'\x1b':
-                return True
-        return False
-
     async def render(self, token_stream):
         self.spinner.status = "Thinking..."
         self.spinner.start()
-        cancelled = False
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
         tty.setcbreak(fd)
         think_filter = ThinkFilter()
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
 
-        try:
+        async def _consume():
             first = True
             async for token in token_stream:
-                if cancelled:
-                    continue
-
-                if self._check_esc(fd):
-                    cancelled = True
-                    if self.spinner.is_running:
-                        self.spinner.stop()
-                        sys.stdout.write("\r\033[K")
-                    sys.stdout.write("\033[0m [stopped]")
-                    sys.stdout.flush()
-                    continue
-
                 if isinstance(token, (RouteEvent, ToolEvent)):
                     status = format_tool_status(token)
                     if isinstance(token, ToolEvent):
@@ -77,8 +59,36 @@ class StreamRenderer:
             if self.spinner.is_running:
                 self.spinner.stop()
                 sys.stdout.write("\r\033[K")
+
+        consume_task = asyncio.create_task(_consume())
+
+        def _on_stdin():
+            try:
+                ch = os.read(fd, 1)
+                if ch == b'\x1b':
+                    stop.set()
+                    consume_task.cancel()
+            except OSError:
+                pass
+
+        loop.add_reader(fd, _on_stdin)
+
+        try:
+            await consume_task
             print()
+        except asyncio.CancelledError:
+            if stop.is_set():
+                if self.spinner.is_running:
+                    self.spinner.stop()
+                    sys.stdout.write("\r\033[K")
+                sys.stdout.write("\033[0m [stopped]")
+                sys.stdout.flush()
+                print()
+            else:
+                raise
         finally:
+            loop.remove_reader(fd)
+            await token_stream.aclose()
             if self.spinner.is_running:
                 self.spinner.stop()
                 sys.stdout.write("\r\033[K")

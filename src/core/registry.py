@@ -218,15 +218,19 @@ class Registry:
             lines.append("No events registered in events/.\n")
             return "\n".join(lines)
 
+        # running contains instance IDs like "loop#1"; extract bare names for marker
+        running_names = {iid.rsplit("#", 1)[0] for iid in (running or [])}
         lines.append("Available slash commands:\n")
         for name, cls in sorted(registry.items()):
             sig = inspect.signature(cls.__init__)
             params = [n for n in sig.parameters if n != "self"]
             arg_hint = " " + " ".join(f"[{p}]" for p in params) if params else ""
-            marker = " ●" if running is not None and name in running else ""
+            marker = " ●" if running is not None and name in running_names else ""
             lines.append(f"- /{name}{arg_hint}{marker}\n")
-        lines.append("- /events — show this list\n")
-        lines.append("- /stop [name] — stop a running event\n")
+        lines.append("- /events              — show this list\n")
+        lines.append("- /stop [name]         — stop a running event (name or instance id)\n")
+        lines.append("- /status              — list recorded event outputs\n")
+        lines.append("- /status [instance_id] — show all iterations for a specific event\n")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------

@@ -34,6 +34,7 @@ from typing import Callable, Optional, TYPE_CHECKING
 
 from PyQt6.QtCore import QObject, QTimer
 
+from src.core.andrew import AndrewCore
 from src.core.event import Event
 from src.core.llm import ToolEvent, RouteEvent, format_tool_status
 from src.core.registry import registry
@@ -83,6 +84,12 @@ class TrayController:
         # Thread-safe queues bridging the asyncio event bus to the Qt main thread
         self._event_notify_queue: queue.SimpleQueue[Event] = queue.SimpleQueue()
         self._event_token_queue: queue.SimpleQueue = queue.SimpleQueue()
+
+        # Shared event log / dispatch / slash logic
+        self._core = AndrewCore()
+        self._core.domain = self.domain
+        self._core._on_event_token = lambda _iid, tok: self._event_token_queue.put(tok)
+        self._core._on_event_done = lambda _iid: self._event_token_queue.put(None)
 
         self._event_poll_timer = QTimer(self._parent)
         self._event_poll_timer.setInterval(100)
@@ -154,25 +161,9 @@ class TrayController:
             if on_token is not None:
                 on_token(t)
 
-        if cmd == "/events":
-            _emit(registry.list_commands(bus.running()))
-            self._panel.on_stream_done()
-            return
-
-        if cmd.startswith("/stop"):
-            parts = cmd.split(None, 1)
-            if len(parts) == 1:
-                running = bus.running()
-                msg = ("Running: " + ", ".join(running)) if running else "No events running."
-                _emit(msg)
-            else:
-                name = parts[1]
-                # remove() is sync but mutates list; safe from Qt thread
-                # since the bg loop only reads _events/_tasks, never writes.
-                if bus.remove(name):
-                    _emit(f"Event **{name}** stopped.")
-                else:
-                    _emit(f"No running event named `{name}`.")
+        response = self._core.handle_slash(cmd, bus)
+        if response is not None:
+            _emit(response)
             self._panel.on_stream_done()
             return
 
@@ -289,42 +280,16 @@ class TrayController:
     # -- event bus ------------------------------------------------------------
 
     def _start_event_bus(self) -> None:
+        self._core.domain = self.domain
         bus = self.domain.event_bus
         bus.notify = self._event_notify
-        bus.dispatch = self._event_dispatch
+        bus.dispatch = self._core._event_dispatch
         asyncio.run_coroutine_threadsafe(bus.start(), self._loop)
 
     # -- event bus callbacks (called from asyncio thread) ---------------------
 
     def _event_notify(self, event: Event) -> None:
         self._event_notify_queue.put(event)
-
-    async def _event_dispatch(self, event: Event) -> None:
-        if not event.message:
-            return
-        sid = getattr(event, "_bridge_sid", None)
-        # Consume the sid for this iteration only — multi-iteration events
-        # (LoopEvent, ProjectEvent) fire _event_dispatch repeatedly; each
-        # subsequent call gets no bridge session so it only renders to the UI.
-        if sid:
-            event._bridge_sid = None
-        try:
-            async for token in self.domain.generate_event(event.message):
-                self._event_token_queue.put(token)
-                if sid and isinstance(token, str):
-                    server.put_token(sid, token)
-            self._event_token_queue.put(None)
-            if sid:
-                server.finish(sid)
-        except asyncio.CancelledError:
-            self._event_token_queue.put(None)
-            if sid:
-                server.finish(sid, error="Event stopped")
-            raise
-        except Exception as e:
-            if sid:
-                server.finish(sid, error=str(e))
-            raise
 
     # -- Qt main thread: poll queues every 100 ms ----------------------------
 

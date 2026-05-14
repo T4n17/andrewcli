@@ -65,7 +65,7 @@ def main():
         uvicorn.run("src.core.server:app", host=args.host, port=args.port)
 
     else:
-        from src.app import AndrewCLI
+        from src.cli.app import AndrewCLI
         from src.shared.config import Config
         if Config().server_enabled:
             from src.core.server import server

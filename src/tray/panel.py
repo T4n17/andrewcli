@@ -61,6 +61,10 @@ class ChatPanel(QWidget):
         self._render_timer.timeout.connect(self._flush_render)
         self._render_cursor_pos = 0
 
+        self._history: list[str] = []
+        self._history_idx: int = 0
+        self._history_saved: str = ""
+
         self._response_md = self._load_conversation()
         self._build_ui()
         self._set_compact()
@@ -283,6 +287,9 @@ class ChatPanel(QWidget):
         text = self._entry.text().strip()
         if not text:
             return
+        self._history.append(text)
+        self._history_idx = len(self._history)
+        self._history_saved = ""
         self._entry.clear()
         self.show_user_message(text)
         self.submitted.emit(text)
@@ -418,8 +425,24 @@ class ChatPanel(QWidget):
 
     def eventFilter(self, obj, event):
         if obj is self._entry and event.type() == event.Type.KeyPress:
-            if event.key() == Qt.Key.Key_Tab:
+            key = event.key()
+            if key == Qt.Key.Key_Tab:
                 self.domain_switch.emit()
+                return True
+            if key == Qt.Key.Key_Up and self._history:
+                if self._history_idx == len(self._history):
+                    self._history_saved = self._entry.text()
+                self._history_idx = max(0, self._history_idx - 1)
+                self._entry.setText(self._history[self._history_idx])
+                self._entry.end(False)
+                return True
+            if key == Qt.Key.Key_Down and self._history:
+                self._history_idx = min(len(self._history), self._history_idx + 1)
+                if self._history_idx == len(self._history):
+                    self._entry.setText(self._history_saved)
+                else:
+                    self._entry.setText(self._history[self._history_idx])
+                self._entry.end(False)
                 return True
         return super().eventFilter(obj, event)
 

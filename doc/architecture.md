@@ -34,6 +34,7 @@ AndrewCLI/                          # Installed package (this repository)
     │   ├── config.py               # Config class — loads ~/.config/andrewcli/config.yaml
     │   └── paths.py                # Centralized paths (PROJECT_ROOT, CONFIG_DIR, LAUNCH_DIR, DATA_DIR, …)
     ├── core/
+    │   ├── andrew.py               # AndrewCore — shared event log, dispatch, slash commands (CLI + tray)
     │   ├── server.py               # FastAPI middleware + shared bridge (inbox queue, session store)
     │   ├── domain.py               # Domain class (async generator, event bus, busy_lock)
     │   ├── event.py                # Event ABC + EventBus (add, remove, running, stop)
@@ -43,17 +44,18 @@ AndrewCLI/                          # Installed package (this repository)
     │   ├── router.py               # ToolRouter — LLM-based tool/skill router
     │   ├── skill.py                # Base Skill class (markdown-defined tools)
     │   └── tool.py                 # Base Tool class — auto-generates OpenAI schemas from type hints
-    ├── ui/                         # CLI rendering layer
+    ├── cli/                        # CLI surface
+    │   ├── app.py                  # AndrewCLI — subclasses AndrewCore, adds terminal I/O
     │   ├── animations.py           # Spinner (async, dynamic status)
     │   ├── filter.py               # ThinkFilter — parses <think> tags for reasoning display
-    │   └── renderer.py             # StreamRenderer — spinner + filtering + typewriter streaming
+    │   └── renderer.py             # StreamRenderer — spinner + filtering + typewriter streaming + ESC-to-stop
     └── tray/                       # System tray GUI (PyQt6)
         ├── __main__.py
         ├── bootstrap.py            # Pre-Qt init (sets QT_QPA_PLATFORM from config)
         ├── app.py                  # Thin shell — constructs TrayController and QApplication
-        ├── controller.py           # TrayController — domain loading, worker lifecycle, signals
+        ├── controller.py           # TrayController — holds AndrewCore, domain loading, worker lifecycle
         ├── worker.py               # StreamWorker QThread — runs domain.generate() on shared async loop
-        ├── panel.py                # ChatPanel widget — input, streamed output, spinner, controls
+        ├── panel.py                # ChatPanel widget — input (with history), streamed output, spinner, controls
         ├── icon.py                 # Tray icon and context menu
         ├── style.css               # Qt stylesheet (Catppuccin Mocha)
         └── md.css                  # CSS for markdown rendering in QTextBrowser
@@ -116,11 +118,26 @@ When the LLM invokes a skill, its body is **promoted into the system prompt** as
 
 ---
 
-## UI Layer
+## CLI Layer
 
-- **`Spinner`** (`animations.py`) — async spinner with a dynamic `.status` property. Shows what the agent is doing: `⠴ Thinking...`, `⠧ Running execute_command: ls -la`, `⠋ Loading: write_file, read_file`.
-- **`ThinkFilter`** (`filter.py`) — streaming parser for `<think>...</think>` tags. Handles tags split across token boundaries. Renders reasoning in dim italic while keeping the final answer in normal text.
-- **`StreamRenderer`** (`renderer.py`) — orchestrates the full output pipeline: spinner lifecycle, `RouteEvent` and `ToolEvent` processing, think filtering, typewriter-effect streaming, ESC-to-stop.
+- **`AndrewCLI`** (`cli/app.py`) — subclasses `AndrewCore`. Adds terminal I/O: `_read_input` (cbreak mode, TAB domain switch, UP/DOWN history, ESC-to-stop), `_bg_print` (atomically clears prompt, prints text, restores prompt), and the main async `run()` loop.
+- **`Spinner`** (`cli/animations.py`) — async spinner with a dynamic `.status` property. Shows what the agent is doing: `⠴ Thinking...`, `⠧ Running execute_command: ls -la`, `⠋ Loading: write_file, read_file`.
+- **`ThinkFilter`** (`cli/filter.py`) — streaming parser for `<think>...</think>` tags. Handles tags split across token boundaries. Renders reasoning in dim italic while keeping the final answer in normal text.
+- **`StreamRenderer`** (`cli/renderer.py`) — orchestrates the full output pipeline: spinner lifecycle, `RouteEvent` and `ToolEvent` processing, think filtering, typewriter-effect streaming, ESC-to-stop.
+
+## AndrewCore
+
+`AndrewCore` (`core/andrew.py`) is the shared logic layer used by both the CLI and the tray. It holds the event output log (`_event_log`, `_event_tool_log`) and live-generation buffers (`_event_live`, `_event_live_tools`), implements `_event_dispatch` (token collection, tool tracking, log update), and exposes `handle_slash` for `/events`, `/stop`, and `/status`.
+
+Surfaces override three hooks:
+
+| Hook | CLI | Tray |
+|---|---|---|
+| `_on_event_token(iid, token)` | no-op (prints atomically at end) | puts token into Qt queue (live streaming) |
+| `_on_event_output(iid, desc, response)` | `_bg_print` banner + response | no-op (already streamed) |
+| `_on_event_done(iid)` | no-op | puts `None` sentinel into Qt queue |
+
+`/status [id]` shows: iteration count, per-iteration tool calls with arguments and result previews, and a live `[generating]` block with partial text and in-progress tool calls while generation is running.
 
 ---
 
@@ -128,9 +145,9 @@ When the LLM invokes a skill, its body is **promoted into the system prompt** as
 
 A **PyQt6 system tray application** that uses the same domain classes and async logic as the CLI. `app.py` is a thin shell that constructs the `QApplication` and delegates all orchestration to `TrayController` (`controller.py`).
 
-- **`controller.py`** — handles domain loading, `StreamWorker` lifecycle, and the event bridge.
+- **`controller.py`** — holds an `AndrewCore` instance that handles all event logging and slash commands (`/events`, `/stop`, `/status`). Manages domain loading and `StreamWorker` lifecycle. Wires `AndrewCore`'s hooks so event tokens are queued for the Qt main thread.
 - **`worker.py`** — `StreamWorker` QThread runs `domain.generate()` on a shared asyncio event loop via `asyncio.run_coroutine_threadsafe`. Emits `token_received`, `tool_status`, `finished`, and `error` signals. Cancellation cancels the asyncio future and sets a flag checked during streaming.
-- **`panel.py`** — `ChatPanel` with a `QLineEdit` input, `QTextBrowser` for streamed markdown output, and header controls. Braille spinner driven by `QTimer` shows tool names during execution and routing. Conversation history is persisted to `$LAUNCH_DIR/.andrewcli/data/conversation.md` and restored on next launch.
+- **`panel.py`** — `ChatPanel` with a `QLineEdit` input, `QTextBrowser` for streamed markdown output, and header controls. UP/DOWN arrow keys navigate input history. TAB cycles domains. Braille spinner driven by `QTimer` shows tool names during execution and routing. Conversation history is persisted to `$LAUNCH_DIR/.andrewcli/data/conversation.md` and restored on next launch.
 - **Event bridge** — the `EventBus` runs on the shared asyncio loop. A `queue.SimpleQueue` bridges it to the Qt main thread. A `QTimer` polling at 100 ms drains the queue, shows balloon notifications via `QSystemTrayIcon.showMessage`, and routes tokens to the panel — all without blocking the Qt or asyncio loops.
 - Submitting a new message while generating **cancels the previous generation** and waits before starting a new one.
 
@@ -140,7 +157,7 @@ A **PyQt6 system tray application** that uses the same domain classes and async 
 
 The entire I/O pipeline is non-blocking:
 
-1. **`andrewcli.py`** — runs under `asyncio.run()`. Input read via a custom async `_read_input()` using cbreak mode, supporting TAB and UP/DOWN history.
+1. **`AndrewCLI`** (`cli/app.py`) — runs under `asyncio.run()`. Input read via a custom async `_read_input()` using cbreak mode, supporting TAB domain switch and UP/DOWN history.
 2. **Router** — async LLM-as-classifier call that returns the minimal tool/skill set for the prompt.
 3. **Spinner** — `asyncio` task that animates and updates status text from `RouteEvent` and `ToolEvent`s.
 4. **Streaming** — `LLM.generate()` is an async generator. Tokens are yielded as they arrive. `ToolEvent` objects are also yielded to update the spinner.

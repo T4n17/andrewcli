@@ -37,77 +37,85 @@ class EventBus:
     :py:meth:`add` (usually driven by user slash commands like
     ``/timer 30``).
 
+    Each event instance gets a unique ID of the form ``name#N`` (e.g.
+    ``loop#1``, ``loop#2``) so multiple instances of the same event type
+    can run simultaneously. :py:meth:`remove` accepts either an exact
+    instance ID or a bare name (which removes *all* instances of that
+    type).
+
     Set `notify` and `dispatch` before calling `start()` — these are
     injected by the app layer so that each surface (CLI, tray) can handle
     notification and rendering in its own way.
 
         bus.notify   = sync  (event: Event) -> None   — for UI notification
         bus.dispatch = async (event: Event) -> None   — for agent response
-
-    Typical usage from Domain:
-        self.event_bus = EventBus()
-
-    Then in the app before starting:
-        self.domain.event_bus.notify  = self._on_event_notify
-        self.domain.event_bus.dispatch = self._on_event_dispatch
-        asyncio.create_task(self.domain.event_bus.start())
     """
 
-    def __init__(self, events: list[Event] | None = None):
-        self._events: list[Event] = list(events) if events else []
-        self._tasks: list[asyncio.Task] = []
+    def __init__(self):
+        self._events: dict[str, Event] = {}         # instance_id -> Event
+        self._tasks: dict[str, asyncio.Task] = {}   # instance_id -> Task
+        self._counter = 0
         self.notify: Callable[[Event], None] | None = None
         self.dispatch: Callable[[Event], Awaitable] | None = None
 
     async def start(self) -> None:
-        """Run all events concurrently. Runs until cancelled."""
-        if not self._events:
-            return
-        self._tasks = [
-            asyncio.create_task(self._run(event), name=f"event:{event.name}")
-            for event in self._events
-        ]
-        await asyncio.gather(*self._tasks, return_exceptions=True)
+        """No-op entry point kept for API compatibility.
 
-    def add(self, event: Event) -> None:
-        """Add and immediately start a new event on the running bus.
+        All event tasks are created and managed by :py:meth:`add`; there
+        are no pre-seeded events to start here.
+        """
+
+    def add(self, event: Event) -> str:
+        """Start a new event and return its unique instance ID.
 
         Safe to call after start() — creates an independent asyncio task
-        that is tracked in _tasks so stop() cancels it too.
+        that is tracked so :py:meth:`remove` / :py:meth:`stop` cancel it.
         notify and dispatch must already be set before the event first fires.
         """
-        self._events.append(event)
-        task = asyncio.create_task(self._run(event), name=f"event:{event.name}")
-        self._tasks.append(task)
+        self._counter += 1
+        instance_id = f"{event.name}#{self._counter}"
+        event._instance_id = instance_id
+        self._events[instance_id] = event
+        task = asyncio.create_task(self._run(event), name=f"event:{instance_id}")
+        self._tasks[instance_id] = task
+        return instance_id
 
-    def remove(self, name: str) -> bool:
-        """Cancel and remove the event with the given name.
+    def remove(self, key: str) -> bool:
+        """Cancel and remove an event by instance ID or by name.
 
-        Returns True if found and cancelled, False if no such event is running.
-        Task.cancel() is thread-safe; list mutation is safe here because only
-        the owner thread (the one that calls add/remove/stop) ever mutates the
-        lists — the bg asyncio loop only reads them.
+        If *key* matches an exact instance ID (e.g. ``loop#2``), only that
+        instance is removed.  If *key* is a bare name (e.g. ``loop``), ALL
+        running instances of that event type are removed.
+
+        Returns True if at least one event was found and cancelled.
         """
-        for i, event in enumerate(self._events):
-            if event.name == name:
-                if i < len(self._tasks):
-                    self._tasks[i].cancel()
-                    self._tasks.pop(i)
-                self._events.pop(i)
-                return True
-        return False
+        # Exact instance ID match
+        if key in self._events:
+            self._tasks[key].cancel()
+            del self._tasks[key]
+            del self._events[key]
+            return True
+
+        # Name match — remove all instances of this event type
+        matches = [iid for iid, e in self._events.items() if e.name == key]
+        if not matches:
+            return False
+        for iid in matches:
+            self._tasks[iid].cancel()
+            del self._tasks[iid]
+            del self._events[iid]
+        return True
 
     def running(self) -> list[str]:
-        """Return the names of all currently active (non-done) events."""
+        """Return instance IDs of all currently active (non-done) events."""
         return [
-            event.name
-            for event, task in zip(self._events, self._tasks)
+            iid for iid, task in self._tasks.items()
             if not task.done()
         ]
 
     def stop(self) -> None:
         """Cancel all running event tasks."""
-        for task in self._tasks:
+        for task in self._tasks.values():
             task.cancel()
         self._tasks.clear()
         self._events.clear()
@@ -124,5 +132,8 @@ class EventBus:
             except asyncio.CancelledError:
                 break
             except Exception:
-                log.exception("error in event '%s'", event.name)
+                log.exception(
+                    "error in event '%s'",
+                    getattr(event, "_instance_id", event.name),
+                )
                 await asyncio.sleep(1)

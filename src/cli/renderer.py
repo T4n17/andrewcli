@@ -5,8 +5,8 @@ import termios
 import tty
 
 from src.core.llm import ToolEvent, RouteEvent, format_tool_status
-from src.ui.animations import Spinner
-from src.ui.filter import ThinkFilter
+from src.cli.animations import Spinner
+from src.cli.filter import ThinkFilter
 
 
 class StreamRenderer:

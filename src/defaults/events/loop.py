@@ -1,4 +1,5 @@
 import asyncio
+import glob
 import json
 import os
 from typing import Optional
@@ -217,6 +218,9 @@ class LoopEvent(Event):
     """
 
     name = "loop"
+    # Tracks state files claimed this session so parallel /loop calls
+    # don't race to the same slot even before any file is written.
+    _session_files: set[str] = set()
 
     def __init__(
         self,
@@ -239,6 +243,11 @@ class LoopEvent(Event):
                 file.
             state_file: Path to the JSON state file.
         """
+        self._state_file_arg = state_file
+        # Auto-suffix with instance counter when using the default name and a
+        # new goal is given, so parallel loops don't share the same file.
+        # Resume mode (no goal) deliberately keeps the explicit path as-is.
+        self._use_instance_suffix = bool(goal) and state_file == "loop_state.json"
         self.state_file = os.path.abspath(state_file)
         self._summary_sent = False
         self._plan_sent = False
@@ -258,17 +267,19 @@ class LoopEvent(Event):
         self._user_max_iterations = max(0, int(max_iterations or 0))
 
         if not goal:
-            # Resume mode: recover the goal from the existing state file.
-            raw = self._load_raw()
-            if raw is None:
+            # Resume mode: find and load the right state file.
+            resolved = self._find_state_file(self.state_file)
+            if resolved is None:
                 raise ValueError(
-                    f"/loop requires a goal when no state file exists at "
-                    f"{state_file!r}. Usage: /loop <goal>"
+                    f"/loop requires a goal when no state file exists. "
+                    f"Usage: /loop <goal>"
                 )
-            goal = raw.get("goal", "")
+            self.state_file = resolved
+            raw = self._load_raw()
+            goal = (raw or {}).get("goal", "")
             if not goal:
                 raise ValueError(
-                    f"State file {state_file!r} is missing a 'goal' field; "
+                    f"State file {self.state_file!r} is missing a 'goal' field; "
                     f"cannot resume. Pass an explicit goal: /loop <goal>"
                 )
 
@@ -276,6 +287,28 @@ class LoopEvent(Event):
         self.description = f"Loop: {goal[:60]}"
 
     # ------------------------------------------------------------------ state
+
+    @staticmethod
+    def _find_state_file(default_path: str) -> str | None:
+        """Return a state file path to resume from, or None if none found.
+
+        Tries the exact path first, then scans for numbered variants
+        (e.g. loop_state_1.json). Raises ValueError when multiple exist.
+        """
+        if os.path.exists(default_path):
+            return default_path
+        base, ext = os.path.splitext(default_path)
+        candidates = sorted(glob.glob(f"{base}_*{ext}"))
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+        names = ", ".join(os.path.basename(c) for c in candidates)
+        raise ValueError(
+            f"Multiple state files found: {names}\n"
+            f"Specify which to resume, e.g.: "
+            f"/loop \"\" 0 {os.path.basename(candidates[0])}"
+        )
 
     def _load_raw(self) -> dict | None:
         """Read the state file verbatim as a dict, with no schema validation."""
@@ -441,6 +474,17 @@ class LoopEvent(Event):
     # ---------------------------------------------------- event interface
 
     async def condition(self):
+        if self._use_instance_suffix:
+            base, ext = os.path.splitext(os.path.abspath(self._state_file_arg))
+            n = 1
+            while True:
+                candidate = f"{base}_{n}{ext}"
+                if not os.path.exists(candidate) and candidate not in LoopEvent._session_files:
+                    break
+                n += 1
+            self.state_file = candidate
+            LoopEvent._session_files.add(candidate)
+            self._use_instance_suffix = False
         self._current_message = None  # invalidate per-iteration cache
         if self._summary_sent:
             raise asyncio.CancelledError

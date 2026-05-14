@@ -2,6 +2,8 @@
 
 An **Event** is a self-contained background observer. Each event runs as an asyncio task inside a domain's `EventBus` — which starts empty and is populated at runtime via slash commands (`/timer 30`, `/project "..."`) or the HTTP API. Events are decoupled from domain definitions: the same `events/` catalog is available from every domain.
 
+Each event instance gets a **unique ID** of the form `name#N` (e.g. `loop#1`, `loop#2`), so multiple instances of the same event type can run simultaneously. `/stop loop` stops all loops; `/stop loop#2` stops only that instance.
+
 ---
 
 ## How Events Work
@@ -11,24 +13,29 @@ Each event defines two things:
 - **`condition()`** — an async coroutine that blocks until the triggering condition is met. It can be a sleep, a file-modification check, a queue wait, or any awaitable.
 - **`trigger()`** — called once `condition()` returns. Performs any side-effect needed before the agent message is sent.
 
-If the event sets a `message` string, the `EventBus` automatically dispatches it to the agent via `domain.generate_event()` — a fresh, isolated LLM call that never touches the conversation memory or affects routing for user queries.
+If the event sets a `message` string, the `EventBus` calls `domain.generate_event()` — a fresh, isolated LLM call that never touches the conversation memory or affects routing for user queries.
+
+### Background dispatch (CLI)
+
+In the CLI, event generation runs **entirely in the background** — the agent generates its response silently while the user prompt remains active. When generation completes, the result is printed atomically: the current prompt line is cleared, the event banner and response are written, and the prompt is redrawn with any partial input the user had typed. The user can type commands (including `/stop`) at any time between event iterations.
+
+Use `/status [id]` to inspect recorded output from any event instance without waiting for it to fire again. While generation is in progress, `/status` shows the partial response and any tool calls already made in the current iteration — tool name, arguments, and a truncated result preview. Once complete, each past iteration shows the full tool trace and response.
 
 ### Serialization via `Domain.busy_lock`
 
 Both `domain.generate()` (user turns) and `domain.generate_event()` (event dispatches) acquire a single `asyncio.Lock` on the domain:
 
-- Only one agent interaction streams to the UI at a time.
-- Events queue **FIFO** behind each other and behind any in-flight user turn.
-- A timer event cannot pile up on itself — each event's `_run` loop awaits the full `condition → trigger → notify → dispatch` chain before re-arming.
+- Only one agent interaction runs at a time — events that fire while a user turn is in progress wait for the lock.
+- A timer event cannot pile up on itself — each event's `_run` loop awaits the full `condition → trigger → dispatch` chain before re-arming.
 - The CLI and tray inherit identical behavior without per-surface locks.
 
 ### Notification
 
-When an event fires, both surfaces are notified:
-- **CLI**: a colored banner (`◆ Event [name]`) is printed, followed by the agent's streamed response.
-- **Tray**: a system tray balloon message appears and the panel opens to show the response.
+When an event fires:
+- **CLI**: the response is generated silently in the background. When complete, a colored banner (`◆ Event [instance_id]`) and the agent's response are printed atomically above the prompt.
+- **Tray**: the response streams live; a system tray balloon appears and the panel opens to show it.
 
-Event responses are rendered exactly like user-initiated responses (routing, spinner, tool calls) but use an isolated LLM instance so the conversation memory is never polluted.
+Event responses use an isolated LLM instance so the conversation memory is never polluted.
 
 ---
 
@@ -38,17 +45,19 @@ Events are activated at runtime via slash commands — no domain restart require
 
 ```
 /events                              — list available events and which are running
-/stop [name]                         — stop a running event by name
+/stop [name]                         — stop a running event by name (clears its status log)
 /stop                                — list the names of currently running events
+/status                              — list all events with status and iteration count
+/status [id]                         — show full output log for a specific event instance
 
 /timer 30                            → TimerEvent(interval=30.0)
 /file war_news/news.md 5.0 "Update!" → FileEvent("war_news/news.md", 5.0, "Update!")
 /monitor "curl -sL https://example.com" 300
 /project "Build a REST API in Python"
-/project                              → resume from project_state.json
+/project                              → resume (auto-detects state file)
 /loop "Monitor oil price; stop if < $100"
 /loop "Poll /status until ready" 30
-/loop                                  → resume from loop_state.json
+/loop                                  → resume (auto-detects state file)
 /schedule "Run skill 1" 10-10-2026-11-30
 ```
 
@@ -89,9 +98,17 @@ Quoted strings with spaces are handled correctly (`shlex` tokenisation). Argumen
 2. **Iterations 1…N (execution)** — the next pending task is passed to the agent, which completes it and marks it `done: true` in `state_file`.
 3. **Final iteration** — all tasks are done. The agent summarises what was built and confirms each constraint was honoured, then the event stops.
 
+### State file isolation
+
+When a goal is provided and the default filename is used, the state file is automatically suffixed with the instance counter (`project_state_1.json`, `project_state_2.json`, …) so two parallel projects never collide. An explicit path (e.g. `/project "goal" my_project.json`) is always used as-is.
+
 ### Resume mode
 
-Invoking `/project` with no goal reads the existing `state_file`, recovers the goal from its `"goal"` field, and picks up at the next pending task. If no state file exists, the event raises a clear error pointing back to `/project <goal>`.
+Invoking `/project` with no goal auto-detects the state file:
+
+- **0 files found** — raises an error pointing back to `/project <goal>`.
+- **1 file found** — resumes from it automatically.
+- **Multiple files found** — lists the candidates and asks the user to pick one explicitly (e.g. `/project "" project_state_2.json`).
 
 ### State schema
 
@@ -132,9 +149,19 @@ The file is parsed via a Pydantic 2 model (`ProjectState` / `ProjectTask`) so wr
 2. **Iterations 1…N (execution)** — each iteration the agent performs the action once, records a `last_observation`, and evaluates every exit criterion. If any criterion is met it sets `terminated: true` and writes a `termination_reason`.
 3. **Final iteration** — an exit criterion fired or the iteration cap was reached. The agent summarises the run and the event stops.
 
+### State file isolation
+
+When a goal is provided and the default filename is used, the state file is automatically suffixed with the instance counter (`loop_state_1.json`, `loop_state_2.json`, …) so two parallel loops never collide. An explicit path is always used as-is.
+
 ### Resume mode
 
-Invoking `/loop` with no goal reads the existing `state_file` and continues from the last recorded iteration count. If a `max_iterations` argument is passed on resume, it overrides whatever was on disk.
+Invoking `/loop` with no goal auto-detects the state file using the same logic as `ProjectEvent`:
+
+- **0 files found** — raises an error pointing back to `/loop <goal>`.
+- **1 file found** — resumes from it automatically.
+- **Multiple files found** — lists the candidates and asks the user to pick one explicitly (e.g. `/loop "" 0 loop_state_2.json`).
+
+If a `max_iterations` argument is passed on resume, it overrides whatever was on disk.
 
 ### State schema
 

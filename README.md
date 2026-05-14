@@ -75,19 +75,29 @@ Andrew is running...
 ⠋ Running write_file: greeting.txt
 Andrew: File greeting.txt written successfully.
 
-[general] Ask: [TAB]                      # TAB switches domain
+[general] Ask: [TAB]                         # TAB switches domain
 Switched to domain: coding
 
-[coding] Ask: /project "Build a REST API in Python"
-✓ Event 'project' started
-[coding] Ask:
+[coding] Ask: /loop "Monitor oil price; stop if < $100"
+✓ Event 'loop' started [loop#1]
+[coding] Ask: /loop "Poll /health until 200" 20
+✓ Event 'loop' started [loop#2]             # two loops running in parallel
+[coding] Ask: /events
+Running events: loop#1, loop#2
+...
+[coding] Ask:                                # prompt always available
 
-◆ Event [project]: Project: Build a REST API in Python
-⠋ Running write_file: pyproject.toml
-Andrew: Task 1 done — project structure created.
+◆ Event [loop#1]: iteration 1               # fires silently in background
+Andrew: Current price is $102.4/bbl — above threshold, continuing.
 
-[coding] Ask: /stop project
-✓ Event 'project' stopped
+[coding] Ask: /status loop#1                # inspect output at any time
+=== loop#1 — 1 iteration(s) ===
+[1] Current price is $102.4/bbl — above threshold, continuing.
+
+[coding] Ask: /stop loop#2
+✓ Event 'loop#2' stopped
+[coding] Ask: /stop loop                    # stops all remaining loop instances
+✓ Event 'loop' stopped
 ```
 
 ### CLI controls
@@ -96,22 +106,25 @@ Andrew: Task 1 done — project structure created.
 |-------------|--------|
 | **TAB** | Cycle to the next available domain |
 | **UP / DOWN** | Navigate command history |
-| **ESC** | Stop streaming (background tasks still complete) |
-| `/events` | List available event types and which are running |
-| `/name [args]` | Start a named event (e.g. `/timer 30`, `/project "Build X"`) |
-| `/stop [name]` | Stop a running event; `/stop` alone lists running events |
+| **ESC** | Stop the current generation immediately (inference cancelled, not just display) |
+| `/events` | List available event types and which are running (with instance IDs) |
+| `/name [args]` | Start a named event — returns an instance ID (e.g. `loop#1`) |
+| `/stop [id\|name]` | Stop by instance ID (`loop#1`) or name (stops all instances of that type) |
+| `/status` | List all events with recorded output and iteration count |
+| `/status [id]` | Show all recorded responses for a specific event instance |
 
 ### Tray controls
 
 | Key / Control | Action |
 |---------------|--------|
 | **TAB** | Cycle to the next available domain |
+| **UP / DOWN** | Navigate command history |
 | **Domain button** | Cycle to the next available domain |
 | **Stop button** | Cancel the current generation |
 | **Clear button** | Clear chat view and reset conversation memory |
 | **ESC** | Hide the panel window |
 | **▽ / △ button** | Toggle compact / expanded view |
-| `/events`, `/name [args]`, `/stop [name]` | Same as CLI |
+| `/events`, `/name [args]`, `/stop [id\|name]`, `/status [id]` | Same as CLI |
 
 ---
 

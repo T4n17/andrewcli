@@ -14,6 +14,13 @@ class ToolEvent:
         self.tool_args = tool_args
 
 
+class ToolResultEvent:
+    def __init__(self, tool_name: str, tool_args: dict, result: str):
+        self.tool_name = tool_name
+        self.tool_args = tool_args
+        self.result = result
+
+
 class RouteEvent:
     def __init__(self, tool_names: list[str]):
         self.tool_names = tool_names
@@ -179,6 +186,7 @@ class LLM:
                         "tool_call_id": tc["id"],
                         "content": str(result),
                     })
+                    yield ToolResultEvent(tc["name"], args, str(result))
 
                 yield ToolEvent()
 

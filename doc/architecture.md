@@ -127,7 +127,7 @@ When the LLM invokes a skill, its body is **promoted into the system prompt** as
 
 ## AndrewCore
 
-`AndrewCore` (`core/andrew.py`) is the shared logic layer used by both the CLI and the tray. It holds the event output log (`_event_log`, `_event_tool_log`) and live-generation buffers (`_event_live`, `_event_live_tools`), implements `_event_dispatch` (token collection, tool tracking, log update), and exposes `handle_slash` for `/events`, `/stop`, and `/status`.
+`AndrewCore` (`core/andrew.py`) is the shared logic layer used by both the CLI and the tray. It holds the event output log (`_event_log`, `_event_tool_log`) and live-generation buffers (`_event_live`, `_event_live_tools`), implements `_event_dispatch` (token collection, tool tracking, log update), and exposes `handle_slash` for `/events`, `/stop`, `/status`, `/clear`, and `/reset`.
 
 Surfaces override three hooks:
 

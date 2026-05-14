@@ -107,11 +107,14 @@ Andrew: Current price is $102.4/bbl — above threshold, continuing.
 | **TAB** | Cycle to the next available domain |
 | **UP / DOWN** | Navigate command history |
 | **ESC** | Stop the current generation immediately (inference cancelled, not just display) |
+| `/help` | Show built-in commands (`/clear`, `/reset`, `/events`, etc.) |
 | `/events` | List available event types and which are running (with instance IDs) |
 | `/name [args]` | Start a named event — returns an instance ID (e.g. `loop#1`) |
 | `/stop [id\|name]` | Stop by instance ID (`loop#1`) or name (stops all instances of that type) |
 | `/status` | List all events with recorded output and iteration count |
 | `/status [id]` | Show all recorded responses for a specific event instance |
+| `/clear` | Clear the screen — text only, memory is kept |
+| `/reset` | Clear conversation memory — text is kept |
 
 ### Tray controls
 
@@ -121,10 +124,13 @@ Andrew: Current price is $102.4/bbl — above threshold, continuing.
 | **UP / DOWN** | Navigate command history |
 | **Domain button** | Cycle to the next available domain |
 | **Stop button** | Cancel the current generation |
-| **Clear button** | Clear chat view and reset conversation memory |
+| **Clear button** | Clear the chat display (text only, memory is kept) |
 | **ESC** | Hide the panel window |
 | **▽ / △ button** | Toggle compact / expanded view |
+| `/help` | Show built-in commands (`/clear`, `/reset`, `/events`, etc.) |
 | `/events`, `/name [args]`, `/stop [id\|name]`, `/status [id]` | Same as CLI |
+| `/clear` | Clear the chat display (text only, memory is kept) |
+| `/reset` | Clear conversation memory (text is kept) |
 
 ---
 

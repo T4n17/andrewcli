@@ -44,11 +44,14 @@ Event responses use an isolated LLM instance so the conversation memory is never
 Events are activated at runtime via slash commands — no domain restart required. The same syntax works in the CLI input prompt, the tray panel input field, and the server's `/chat` endpoint.
 
 ```
+/help                                — show built-in commands (/clear, /reset, /events, etc.)
 /events                              — list available events and which are running
 /stop [name]                         — stop a running event by name (clears its status log)
 /stop                                — list the names of currently running events
 /status                              — list all events with status and iteration count
 /status [id]                         — show full output log for a specific event instance
+/clear                               — clear the screen / chat display (memory is kept)
+/reset                               — clear conversation memory (display is kept)
 
 /timer 30                            → TimerEvent(interval=30.0)
 /file war_news/news.md 5.0 "Update!" → FileEvent("war_news/news.md", 5.0, "Update!")

@@ -210,6 +210,9 @@ class AndrewCLI(AndrewCore):
                 bus = self.domain.event_bus
                 started_event = None
                 response = self.handle_slash(cmd, bus)
+                if cmd == "/clear" and response is not None:
+                    sys.stdout.write("\033[2J\033[H")
+                    sys.stdout.flush()
                 if response is None:
                     try:
                         started_event = registry.parse_slash_command(user_input)
@@ -224,7 +227,7 @@ class AndrewCLI(AndrewCore):
                         instance_id = bus.add(started_event)
                         response = f"✓ Event '{started_event.name}' started [{instance_id}]"
                     else:
-                        response = f"Unknown command: {user_input}\n" + registry.list_commands(bus.running())
+                        response = f"Unknown command: {user_input}\n" + registry.list_builtins()
                 sys.stdout.write(f"\033[32m{response}\033[0m\n")
                 sys.stdout.flush()
                 if sid:

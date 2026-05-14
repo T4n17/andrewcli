@@ -163,6 +163,8 @@ class TrayController:
 
         response = self._core.handle_slash(cmd, bus)
         if response is not None:
+            if cmd == "/clear":
+                self._panel._on_clear()
             _emit(response)
             self._panel.on_stream_done()
             return
@@ -175,7 +177,7 @@ class TrayController:
                 on_token(str(exc))
             return
         if event is None:
-            err = f"Unknown command: `{text}`\n\n" + registry.list_commands(bus.running())
+            err = f"Unknown command: `{text}`\n\n" + registry.list_builtins()
             self._panel.on_error(err)
             if on_token is not None:
                 on_token(err)
@@ -253,7 +255,6 @@ class TrayController:
 
     def clear(self) -> None:
         self.stop()
-        self.domain.llm.memory.clear()
 
     def switch_domain(self) -> None:
         domains = registry.domains()

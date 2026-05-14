@@ -196,41 +196,50 @@ class Registry:
             return None
         return self._instantiate_event(cls, args)
 
-    def list_commands(self, running: list[str] | None = None) -> str:
-        """Return a human-readable table of available slash commands.
+    def list_builtins(self) -> str:
+        """Return the static built-in slash command reference (for ``/help``)."""
+        return (
+            "Built-in commands:\n"
+            "- /help                        — show this help\n"
+            "- /events                      — list available events and which are running\n"
+            "- /stop [name|id]              — stop a running event by name or instance id\n"
+            "- /status                      — list all events with status and iteration count\n"
+            "- /status [id]                 — show full output log for a specific event\n"
+            "- /clear                       — clear the screen (text only, memory kept)\n"
+            "- /reset                       — clear conversation memory (text kept)\n"
+        )
+
+    def list_events(self, running: list[str] | None = None) -> str:
+        """Return available events and which are currently running (for ``/events``).
 
         If *running* is provided (from :py:meth:`EventBus.running`),
         active events are shown with a marker so the user knows what
         can be stopped.
         """
-        registry = self.events()
+        ev = self.events()
         lines: list[str] = []
 
         if running is not None:
             if running:
                 lines.append("Running events: " + ", ".join(running))
-                lines.append("  /stop [name]         — stop a running event")
+                lines.append("  /stop [name|id]  — stop a running event")
             else:
-                lines.append("No events currently running.\n")
+                lines.append("No events currently running.")
             lines.append("")
 
-        if not registry:
+        if not ev:
             lines.append("No events registered in events/.\n")
             return "\n".join(lines)
 
         # running contains instance IDs like "loop#1"; extract bare names for marker
         running_names = {iid.rsplit("#", 1)[0] for iid in (running or [])}
-        lines.append("Available slash commands:\n")
-        for name, cls in sorted(registry.items()):
+        lines.append("Available events:\n")
+        for name, cls in sorted(ev.items()):
             sig = inspect.signature(cls.__init__)
             params = [n for n in sig.parameters if n != "self"]
             arg_hint = " " + " ".join(f"[{p}]" for p in params) if params else ""
             marker = " ●" if running is not None and name in running_names else ""
             lines.append(f"- /{name}{arg_hint}{marker}\n")
-        lines.append("- /events              — show this list\n")
-        lines.append("- /stop [name]         — stop a running event (name or instance id)\n")
-        lines.append("- /status              — list recorded event outputs\n")
-        lines.append("- /status [instance_id] — show all iterations for a specific event\n")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------

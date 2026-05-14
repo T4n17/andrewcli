@@ -132,8 +132,18 @@ class AndrewCore:
         ``None`` if the command is not recognised here (caller should try
         event-start parsing).
         """
+        if cmd == "/clear":
+            return "✓ Screen cleared."
+
+        if cmd == "/reset":
+            self.domain.llm.memory.clear()
+            return "✓ Memory cleared."
+
+        if cmd == "/help":
+            return registry.list_builtins()
+
         if cmd == "/events":
-            return registry.list_commands(bus.running())
+            return registry.list_events(bus.running())
 
         if cmd.startswith("/stop"):
             parts = cmd.split(None, 1)

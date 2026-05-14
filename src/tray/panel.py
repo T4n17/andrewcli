@@ -278,6 +278,7 @@ class ChatPanel(QWidget):
 
     def _on_clear(self):
         self._response_md = ""
+        self._render_cursor_pos = 0
         self._browser.setPlainText("")
         self._clear_btn.hide()
         self._save_conversation()
@@ -325,15 +326,14 @@ class ChatPanel(QWidget):
             self._render_timer.start()
 
     def _flush_render(self):
-        new_text = self._response_md[self._render_cursor_pos:]
-        if not new_text or not self.isVisible():
+        if not self._response_md or not self.isVisible():
             return
-        self._render_cursor_pos = len(self._response_md)
-        cursor = self._browser.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        cursor.insertText(new_text)
         sb = self._browser.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        at_bottom = sb.value() >= sb.maximum() - 2
+        self._browser.setMarkdown(self._response_md)
+        self._render_cursor_pos = len(self._response_md)
+        if at_bottom:
+            sb.setValue(sb.maximum())
 
     def on_tool_status(self, status: str):
         self._start_spinner(status)

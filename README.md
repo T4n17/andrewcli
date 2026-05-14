@@ -23,29 +23,25 @@ After installation the `andrewcli` command is available system-wide.
 
 ## Configure
 
-Set your LLM endpoint via environment variables:
+The first time you run `andrewcli`, `~/.config/andrewcli/` is auto-created and seeded with a `config.yaml`, default domains, and events. Edit anything there freely — AndrewCLI never overwrites existing files.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `API_BASE_URL` | `http://localhost:8080/v1` | OpenAI-compatible API URL |
-| `MODEL` | `qwen3.5:9B` | Main chat model |
-| `SUMMARY_MODEL` | same as `MODEL` | Smaller model for background memory summarization |
-| `OPENAI_API_KEY` | `local` | API key — defaults to `"local"` for local servers |
-
-The first time you run `andrewcli`, `~/.config/andrewcli/` is auto-created and seeded with default domains, events, and a `config.yaml`. Edit anything in there freely — AndrewCLI never overwrites existing files.
-
-Key settings in `~/.config/andrewcli/config.yaml`:
+Open `~/.config/andrewcli/config.yaml` and set your LLM endpoint:
 
 ```yaml
 domain: "general"
+api_base_url: "http://localhost:8080/v1"  # OpenAI-compatible endpoint
+model: "your-model-name"
+routing_enabled: false
 
 memory:
   enabled: true            # set false to disable rolling summary entirely
   min_summary_chars: 200   # turns shorter than this skip the LLM merge
 
 server:
-  enabled: true            # auto-start the FastAPI bridge with the CLI/tray
+  enabled: false           # auto-start the FastAPI bridge with the CLI/tray
 ```
+
+`OPENAI_API_KEY` defaults to `"local"` — set it as an env var only if your server requires a real key. `SUMMARY_MODEL` can be set as an env var to route background memory merges to a smaller model.
 
 ---
 

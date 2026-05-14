@@ -211,7 +211,11 @@ class AndrewCLI(AndrewCore):
                 started_event = None
                 response = self.handle_slash(cmd, bus)
                 if response is None:
-                    started_event = registry.parse_slash_command(user_input)
+                    try:
+                        started_event = registry.parse_slash_command(user_input)
+                    except ValueError as exc:
+                        response = str(exc)
+                        started_event = None
                     if started_event is not None:
                         msg_descriptor = inspect.getattr_static(type(started_event), 'message', None)
                         has_message = isinstance(msg_descriptor, property) or bool(started_event.message)

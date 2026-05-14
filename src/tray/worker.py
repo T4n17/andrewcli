@@ -3,7 +3,7 @@ import threading
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from src.core.llm import ToolEvent, RouteEvent, format_tool_status
+from src.core.llm import ToolEvent, ToolResultEvent, RouteEvent, format_tool_status
 
 
 _loop = None
@@ -49,13 +49,19 @@ class StreamWorker(QThread):
                 self.error.emit(str(e))
 
     async def _stream(self):
-        async for token in self.domain.generate(self.message):
-            if self._cancelled:
-                return
-            if isinstance(token, (RouteEvent, ToolEvent)):
-                status = format_tool_status(token)
-                if status is not None:
-                    self.tool_status.emit(status)
-                continue
-            self.token_received.emit(token)
-        self.finished.emit()
+        gen = self.domain.generate(self.message)
+        try:
+            async for token in gen:
+                if self._cancelled:
+                    break
+                if isinstance(token, (RouteEvent, ToolEvent)):
+                    status = format_tool_status(token)
+                    if status is not None:
+                        self.tool_status.emit(status)
+                elif isinstance(token, str):
+                    self.token_received.emit(token)
+                # ToolResultEvent: internal tracking only, not forwarded to panel
+        finally:
+            await gen.aclose()
+        if not self._cancelled:
+            self.finished.emit()

@@ -167,7 +167,13 @@ class TrayController:
             self._panel.on_stream_done()
             return
 
-        event = registry.parse_slash_command(text)
+        try:
+            event = registry.parse_slash_command(text)
+        except ValueError as exc:
+            self._panel.on_error(str(exc))
+            if on_token is not None:
+                on_token(str(exc))
+            return
         if event is None:
             err = f"Unknown command: `{text}`\n\n" + registry.list_commands(bus.running())
             self._panel.on_error(err)
@@ -314,7 +320,7 @@ class TrayController:
                 status = format_tool_status(item)
                 if status is not None:
                     self._panel.on_tool_status(status)
-            else:
+            elif isinstance(item, str):
                 self._panel.append_token(item)
 
         # Bridge inbox: messages injected via the HTTP server.

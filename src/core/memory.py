@@ -223,6 +223,12 @@ class Memory:
         self.messages = []
         self._trimmed = False
         self._active_skills = []
+        self.summary = ""
+        self.last_exchange = ""
+        try:
+            MEMORY_FILE.unlink()
+        except FileNotFoundError:
+            pass
 
     def __str__(self):
         return str(self.get())

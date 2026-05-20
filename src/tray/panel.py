@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -59,13 +60,17 @@ class ChatPanel(QWidget):
         self._render_timer.setInterval(30)
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._flush_render)
-        self._render_cursor_pos = 0
+        # Tracks how many chars of _response_md have already been synced to the
+        # browser so _flush_render can skip redundant setMarkdown calls when
+        # no new tokens have arrived since the last render.
+        self._flushed_len: int = 0
 
         self._history: list[str] = []
         self._history_idx: int = 0
         self._history_saved: str = ""
 
         self._response_md = self._load_conversation()
+        self._flushed_len = len(self._response_md)
         self._build_ui()
         self._set_compact()
 
@@ -125,12 +130,9 @@ class ChatPanel(QWidget):
         self._browser = QTextBrowser()
         self._browser.setOpenExternalLinks(True)
         self._browser.document().setDefaultStyleSheet(self._md_css)
-        # The streaming render path (``cursor.insertText``) uses the
-        # document's default font, not the CSS in md.css - so emoji
-        # in mid-stream tokens render as tofu boxes unless we attach
-        # the same fallback list here too. ``setMarkdown`` (called on
-        # stream-done) goes through CSS and picks up md.css's family
-        # list, so this covers the streaming half of the pipeline.
+        # Attach emoji fallback fonts to the document default so they render
+        # correctly inside setMarkdown (CSS font-family only applies to HTML
+        # elements, not the document-level default used as a base).
         browser_font = self._browser.font()
         browser_font.setFamilies([
             browser_font.family(),
@@ -244,7 +246,8 @@ class ChatPanel(QWidget):
             self._position()
         else:
             self._set_expanded()
-            self._browser.setMarkdown(self._response_md)
+            self._browser.setMarkdown(self._prepare_md(self._response_md))
+            self._flushed_len = len(self._response_md)
             sb = self._browser.verticalScrollBar()
             sb.setValue(sb.maximum())
 
@@ -266,9 +269,9 @@ class ChatPanel(QWidget):
         self._streaming = False
         self._stop_spinner()
         self._render_timer.stop()
-        self._render_cursor_pos = len(self._response_md)
         if self.isVisible():
-            self._browser.setMarkdown(self._response_md)
+            self._browser.setMarkdown(self._prepare_md(self._response_md))
+            self._flushed_len = len(self._response_md)
             sb = self._browser.verticalScrollBar()
             sb.setValue(sb.maximum())
         self._stop_btn.hide()
@@ -278,7 +281,7 @@ class ChatPanel(QWidget):
 
     def _on_clear(self):
         self._response_md = ""
-        self._render_cursor_pos = 0
+        self._flushed_len = 0
         self._browser.setPlainText("")
         self._clear_btn.hide()
         self._save_conversation()
@@ -306,10 +309,10 @@ class ChatPanel(QWidget):
         if self._response_md:
             self._response_md += "\n\n---\n\n"
         self._response_md += f"**You:** {text}\n\n**Andrew:** "
-        self._browser.setMarkdown(self._response_md)
+        self._browser.setMarkdown(self._prepare_md(self._response_md))
+        self._flushed_len = len(self._response_md)
         sb = self._browser.verticalScrollBar()
         sb.setValue(sb.maximum())
-        self._render_cursor_pos = len(self._response_md)
         self._streaming = True
         self._start_spinner("Thinking...")
         self._stop_btn.show()
@@ -325,13 +328,44 @@ class ChatPanel(QWidget):
         if not self._render_timer.isActive():
             self._render_timer.start()
 
+    @staticmethod
+    def _prepare_md(md: str) -> str:
+        """Normalize newlines before passing to Qt's Markdown renderer.
+
+        Qt follows CommonMark: a bare ``\\n`` is treated as a paragraph
+        continuation and collapses to a space.  Converting single newlines
+        to double newlines (paragraph breaks) makes the model's line breaks
+        render as visible line breaks.  Lines inside fenced code blocks are
+        left untouched so code indentation is preserved.
+        """
+        result = []
+        in_fence = False
+        for line in md.split('\n'):
+            stripped = line.strip()
+            is_fence = stripped.startswith('```') or stripped.startswith('~~~')
+            if is_fence:
+                in_fence = not in_fence
+            result.append(line)
+            # Add a blank line after every non-empty line outside code blocks
+            # (fence markers excluded — a blank line after the opening fence
+            # breaks code block detection in Qt's parser).
+            if not in_fence and not is_fence and line:
+                result.append('')
+        out = '\n'.join(result)
+        # Collapse 3+ consecutive newlines back to 2 so original paragraph
+        # separators (\n\n) don't balloon into four blank lines.
+        return re.sub(r'\n{3,}', '\n\n', out)
+
     def _flush_render(self):
         if not self._response_md or not self.isVisible():
             return
+        new_text = self._response_md[self._flushed_len:]
+        if not new_text:
+            return
         sb = self._browser.verticalScrollBar()
         at_bottom = sb.value() >= sb.maximum() - 2
-        self._browser.setMarkdown(self._response_md)
-        self._render_cursor_pos = len(self._response_md)
+        self._browser.setMarkdown(self._prepare_md(self._response_md))
+        self._flushed_len = len(self._response_md)
         if at_bottom:
             sb.setValue(sb.maximum())
 
@@ -342,9 +376,9 @@ class ChatPanel(QWidget):
         self._streaming = False
         self._stop_spinner()
         self._render_timer.stop()
-        self._render_cursor_pos = len(self._response_md)
         if self.isVisible():
-            self._browser.setMarkdown(self._response_md)
+            self._browser.setMarkdown(self._prepare_md(self._response_md))
+            self._flushed_len = len(self._response_md)
             sb = self._browser.verticalScrollBar()
             sb.setValue(sb.maximum())
         self._stop_btn.hide()
@@ -364,11 +398,11 @@ class ChatPanel(QWidget):
         self._streaming = False
         self._stop_spinner()
         self._render_timer.stop()
-        self._render_cursor_pos = len(self._response_md)
         self._stop_btn.hide()
         self._label.setText("Error")
         if self.isVisible():
-            self._browser.setMarkdown(self._response_md)
+            self._browser.setMarkdown(self._prepare_md(self._response_md))
+            self._flushed_len = len(self._response_md)
             sb = self._browser.verticalScrollBar()
             sb.setValue(sb.maximum())
             self._entry.setFocus()
@@ -379,14 +413,15 @@ class ChatPanel(QWidget):
         if self._response_md:
             self._response_md += "\n\n---\n\n"
         self._response_md += f"**◆ Event [{event_name}]:** "
-        self._render_cursor_pos = len(self._response_md)
+        self._browser.setMarkdown(self._prepare_md(self._response_md))
+        self._flushed_len = len(self._response_md)
         self._streaming = True
         self._start_spinner(f"Event: {event_name}")
         self._stop_btn.show()
         if not self._expanded:
             self._set_expanded()
-        else:
-            self._browser.setMarkdown(self._response_md)
+        sb = self._browser.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
     # -- public interface -----------------------------------------------------
 
@@ -396,7 +431,8 @@ class ChatPanel(QWidget):
             return
         if self._response_md:
             self._set_expanded()
-            self._browser.setMarkdown(self._response_md)
+            self._browser.setMarkdown(self._prepare_md(self._response_md))
+            self._flushed_len = len(self._response_md)
             sb = self._browser.verticalScrollBar()
             sb.setValue(sb.maximum())
         else:

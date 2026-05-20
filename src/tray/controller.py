@@ -169,6 +169,18 @@ class TrayController:
             self._panel.on_stream_done()
             return
 
+        # Workflows run outside the agent loop — stream through a worker.
+        wf_gen = self.domain.run_workflow(cmd)
+        if wf_gen is not None:
+            self.stop()
+            self._worker = StreamWorker(wf_gen, self.domain)
+            self._worker.token_received.connect(self._panel.append_token)
+            self._worker.tool_status.connect(self._panel.on_tool_status)
+            self._worker.finished.connect(self._panel.on_stream_done)
+            self._worker.error.connect(self._panel.on_error)
+            self._worker.start()
+            return
+
         try:
             event = registry.parse_slash_command(text)
         except ValueError as exc:

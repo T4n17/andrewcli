@@ -54,7 +54,9 @@ Create a new folder under `~/.config/andrewcli/domains/` (e.g. `~/.config/andrew
 ├── system_prompt.md       # the prompt
 ├── tools/                 # optional — auto-discovered *.py
 │   └── __init__.py
-└── skills/                # optional — auto-discovered *.md
+├── skills/                # optional — auto-discovered *.md
+└── workflows/             # optional — auto-discovered *.py
+    └── __init__.py
 ```
 
 No Python subclass is required — the folder *is* the domain. Write `system_prompt.md`:
@@ -74,6 +76,53 @@ routing_enabled: false                      # expose every tool every turn
 Missing keys fall back to the global `~/.config/andrewcli/config.yaml`, then to the `API_BASE_URL` / `MODEL` env vars, then to the `Domain` class-level defaults.
 
 Set `domain: "research"` in the global `config.yaml` to make it the active domain. The folder name must match the config value.
+
+---
+
+## Add a new Workflow
+
+Workflows are scripted pipelines invoked directly via slash command — they run **outside the LLM agent loop**. Use them for deterministic tasks where you want full control over the execution flow, with optional single-shot LLM inference for dynamic steps.
+
+Drop a `*.py` file into the target domain's `workflows/` folder, e.g. `~/.config/andrewcli/domains/general/workflows/my_workflow.py`:
+
+```python
+from src.core.workflow import Workflow
+
+class MyWorkflow(Workflow):
+    name = "my_workflow"          # becomes the slash command: /my_workflow [args]
+    description = "Short description shown in /workflows"
+
+    async def run(self, path: str, detail: str = "brief"):
+        # Deterministic steps run as plain Python — no LLM involved
+        yield f"Processing `{path}` (detail={detail})...\n\n"
+
+        content = open(path).read()
+
+        # Optional: one-shot LLM inference for dynamic parts
+        async for token in self.infer(
+            [{"role": "user", "content": content}],
+            system=f"Produce a {detail} analysis.",
+        ):
+            yield token
+```
+
+**Key points:**
+
+- `run()` is an **async generator** that yields `str` tokens — these stream directly to the CLI/tray renderer, so the user sees output as it arrives.
+- Parameters on `run()` map to command-line arguments. Type hints (`str`, `int`, `float`) are used for automatic coercion. Parameters with defaults are optional.
+- `self.infer(messages, system="")` makes a single streaming LLM call without entering the agent tool-call loop. It raises `RuntimeError` if called before the workflow is configured by the domain (this happens automatically).
+- Workflows acquire the domain's `busy_lock`, so they are serialised with user turns and background events.
+- The `workflows/` folder must contain an `__init__.py` (can be empty) to be importable as a package.
+
+Invoke the workflow at runtime:
+
+```
+/my_workflow report.txt            → run(path="report.txt")
+/my_workflow report.txt detailed   → run(path="report.txt", detail="detailed")
+/workflows                         → list all workflows in the active domain
+```
+
+The workflow is **auto-discovered** on the next user turn — no restart required. A built-in example (`/summarize [path]`) is included in the `general` domain.
 
 ---
 

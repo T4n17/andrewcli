@@ -70,12 +70,22 @@ class LLM:
 
     async def generate(self, prompt: str, tools: List[Tool] = None, skills: List[Skill] = None, max_rounds: int = 50):
         self.memory.add({"role": "user", "content": prompt})
+        # Record where in the message list the current turn begins (the user
+        # message we just appended). Used to strip prior-turn history when a
+        # skill activates so the model only sees the current request.
+        turn_start_idx = len(self.memory.messages) - 1
 
         skills_schemas = [s.to_openai_schema() for s in skills] if skills else None
         tool_schemas = [t.to_openai_schema() for t in tools] if tools else None
 
         all_schemas = (skills_schemas or []) + (tool_schemas or []) or None
         all_callables = (skills or []) + (tools or [])
+
+        # When a skill activates we snapshot the pre-turn messages here and
+        # restore them (plus only the final response) when the skill finishes,
+        # so intermediate tool-call chains never leak into the long-term history.
+        _saved_messages: list | None = None
+        _skill_active = False
 
         # Everything below runs inside a try/finally so the turn-scoped
         # active-skill blocks in Memory are always cleared at turn end,
@@ -127,6 +137,15 @@ class LLM:
 
                 if not tool_calls_accum:
                     self.memory.add({"role": "assistant", "content": content})
+                    if _skill_active and _saved_messages is not None:
+                        # Skill finished: restore the conversation that existed
+                        # before this turn and append only the final result so
+                        # the intermediate skill tool chain is never persisted.
+                        self.memory.messages = _saved_messages + [
+                            {"role": "user", "content": prompt},
+                            {"role": "assistant", "content": content},
+                        ]
+                        _saved_messages = None  # signal finally that restore is done
                     await self.memory.summarize_turn(self.client, self.summary_model)
                     return
 
@@ -166,6 +185,13 @@ class LLM:
                         None,
                     )
                     if isinstance(callable_obj, Skill):
+                        if not _skill_active:
+                            _skill_active = True
+                            # Snapshot history before this turn and replace the
+                            # conversation with only the current-turn messages so
+                            # the model executes the skill without prior context.
+                            _saved_messages = self.memory.messages[:turn_start_idx]
+                            self.memory.messages = self.memory.messages[turn_start_idx:]
                         instructions = callable_obj.run(**args)
                         self.memory.add_active_skill(callable_obj.name, instructions)
                         result = (
@@ -193,10 +219,14 @@ class LLM:
             # Fell out of the max_rounds loop without a final text response.
             # Persist the last non-empty content we actually produced instead
             # of the (possibly empty) content from the final tool-only round.
-            self.memory.add({
-                "role": "assistant",
-                "content": last_content or "(tool loop exceeded max rounds)",
-            })
+            fallback = last_content or "(tool loop exceeded max rounds)"
+            self.memory.add({"role": "assistant", "content": fallback})
+            if _skill_active and _saved_messages is not None:
+                self.memory.messages = _saved_messages + [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": fallback},
+                ]
+                _saved_messages = None  # signal finally that restore is done
             await self.memory.summarize_turn(self.client, self.summary_model)
         finally:
             # Turn scope ends here for every exit path (normal return,
@@ -205,6 +235,11 @@ class LLM:
             # blocks so they don't leak into the next user turn's
             # system prompt.
             self.memory.clear_active_skills()
+            if _skill_active and _saved_messages is not None:
+                # Generator was closed before the skill completed (user stopped
+                # mid-execution). Restore the pre-skill conversation so the
+                # history isn't left in the stripped current-turn-only state.
+                self.memory.messages = _saved_messages
 
     def _execute_tool_call_from_dict(self, tool_call: dict, tools: list) -> str:
         func_name = tool_call["name"]

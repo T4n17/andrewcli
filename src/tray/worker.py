@@ -25,12 +25,20 @@ class StreamWorker(QThread):
     finished = pyqtSignal()
     error = pyqtSignal(str)
 
-    def __init__(self, message, domain):
+    def __init__(self, message_or_gen, domain):
         super().__init__()
-        self.message = message
         self.domain = domain
         self._future = None
         self._cancelled = False
+        # Accept either a plain str (normal LLM turn) or a pre-built async
+        # generator (e.g. from Domain.run_workflow) so workflows can reuse
+        # the same worker without going through domain.generate().
+        if isinstance(message_or_gen, str):
+            self.message = message_or_gen
+            self._gen = None
+        else:
+            self.message = None
+            self._gen = message_or_gen
 
     def cancel(self):
         self._cancelled = True
@@ -49,7 +57,7 @@ class StreamWorker(QThread):
                 self.error.emit(str(e))
 
     async def _stream(self):
-        gen = self.domain.generate(self.message)
+        gen = self._gen if self._gen is not None else self.domain.generate(self.message)
         try:
             async for token in gen:
                 if self._cancelled:

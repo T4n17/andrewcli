@@ -145,6 +145,9 @@ class AndrewCore:
         if cmd == "/events":
             return registry.list_events(bus.running())
 
+        if cmd == "/workflows":
+            return registry.list_workflows(self.domain.workflows)
+
         if cmd.startswith("/stop"):
             parts = cmd.split(None, 1)
             if len(parts) == 1:

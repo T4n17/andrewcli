@@ -1,11 +1,11 @@
-"""Unified registry — auto-discovery of domains, events, tools, and skills.
+"""Unified registry — auto-discovery of domains, events, tools, skills, and workflows.
 
-All four pluggable abstractions follow the same convention: drop a file
-in the right directory and it is picked up at import time, no manual
-registration required. Everything lives under the user's runtime config
-directory at ``~/.config/andrewcli/`` (see :mod:`src.shared.paths`),
-which is added to ``sys.path`` so ``domains.<name>`` and
-``events.<name>`` resolve as regular Python packages.
+All pluggable abstractions follow the same convention: drop a file in the
+right directory and it is picked up at import time, no manual registration
+required. Everything lives under the user's runtime config directory at
+``~/.config/andrewcli/`` (see :mod:`src.shared.paths`), which is added to
+``sys.path`` so ``domains.<name>`` and ``events.<name>`` resolve as regular
+Python packages.
 
 * **Domains** — every subdirectory of ``domains/`` is a domain. Settings
   come from ``domains/<name>/config.yaml`` (overrides the global
@@ -22,6 +22,10 @@ which is added to ``sys.path`` so ``domains.<name>`` and
   subclasses (excluding :class:`~src.core.skill.Skill`).
 * **Skills** — every ``*.md`` file inside a domain's ``skills/`` folder
   is loaded as a :class:`Skill` instance built from its frontmatter.
+* **Workflows** — every ``*.py`` module inside a domain's ``workflows/``
+  package contributes its concrete :class:`~src.core.workflow.Workflow`
+  subclasses. Workflows are invoked directly via ``/name [args]`` and run
+  outside the LLM agent loop.
 
 Most consumers just use the module-level :data:`registry` singleton::
 
@@ -43,6 +47,7 @@ from typing import get_type_hints
 from src.core.event import Event
 from src.core.skill import Skill
 from src.core.tool import Tool
+from src.core.workflow import Workflow
 from src.shared.paths import DOMAINS_DIR, EVENTS_DIR
 
 log = logging.getLogger(__name__)
@@ -90,6 +95,7 @@ class Registry:
                 or (p / "system_prompt.md").is_file()
                 or (p / "tools").is_dir()
                 or (p / "skills").is_dir()
+                or (p / "workflows").is_dir()
             )
         )
 
@@ -202,6 +208,7 @@ class Registry:
             "Built-in commands:\n"
             "- /help                        — show this help\n"
             "- /events                      — list available events and which are running\n"
+            "- /workflows                   — list workflows available in this domain\n"
             "- /stop [name|id]              — stop a running event by name or instance id\n"
             "- /status                      — list all events with status and iteration count\n"
             "- /status [id]                 — show full output log for a specific event\n"
@@ -289,6 +296,132 @@ class Registry:
                 except Exception:
                     log.exception("failed to instantiate tool %s", obj.__name__)
         return tools
+
+    # ------------------------------------------------------------------
+    # Workflows  (per-domain auto-discovery)
+    # ------------------------------------------------------------------
+
+    def workflows(self, package: str) -> list[Workflow]:
+        """Discover and instantiate all Workflow subclasses in *package*.
+
+        *package* is a dotted import path such as
+        ``"domains.general.workflows"``. Missing packages return an empty
+        list so domains that don't declare workflows Just Work.
+        """
+        try:
+            pkg = importlib.import_module(package)
+        except ModuleNotFoundError:
+            return []
+
+        pkg_file = getattr(pkg, "__file__", None)
+        if not pkg_file:
+            return []
+        pkg_path = Path(pkg_file).parent
+
+        found: list[Workflow] = []
+        for path in sorted(pkg_path.glob("*.py")):
+            if path.stem == "__init__":
+                continue
+            module_name = f"{package}.{path.stem}"
+            try:
+                module = importlib.import_module(module_name)
+            except Exception:
+                log.exception("failed to import workflow module %s", module_name)
+                continue
+            for _, obj in inspect.getmembers(module, inspect.isclass):
+                if not issubclass(obj, Workflow) or obj is Workflow:
+                    continue
+                if obj.__module__ != module.__name__:
+                    continue
+                if inspect.isabstract(obj):
+                    continue
+                try:
+                    found.append(obj())
+                except Exception:
+                    log.exception("failed to instantiate workflow %s", obj.__name__)
+        return found
+
+    def parse_workflow_command(
+        self, workflows: list[Workflow], text: str
+    ) -> tuple[Workflow, dict] | None:
+        """Parse ``/name [args]`` against *workflows*.
+
+        Returns ``(workflow, kwargs)`` when a match is found, ``None``
+        otherwise. The kwargs dict is built by matching positional tokens
+        from *text* to the typed parameters of :meth:`~Workflow.run`.
+        """
+        if not text.startswith("/"):
+            return None
+        parts = text[1:].strip().split(None, 1)
+        if not parts:
+            return None
+        name = parts[0].lower()
+        args_str = parts[1] if len(parts) > 1 else ""
+
+        wf = next((w for w in workflows if w.name == name), None)
+        if wf is None:
+            return None
+        return wf, self._parse_workflow_args(wf, args_str)
+
+    @staticmethod
+    def _parse_workflow_args(wf: Workflow, args_str: str) -> dict:
+        """Coerce a raw args string into kwargs for ``wf.run()``.
+
+        Tokens are matched positionally to the declared parameters of
+        :meth:`~Workflow.run` and coerced to their annotated types.
+        VAR_POSITIONAL and VAR_KEYWORD parameters are skipped.
+        """
+        sig = inspect.signature(wf.run)
+        params = [
+            p for p in sig.parameters.values()
+            if p.kind not in (
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.VAR_KEYWORD,
+            )
+        ]
+        if not params or not args_str.strip():
+            return {}
+        try:
+            tokens = shlex.split(args_str)
+        except ValueError:
+            tokens = args_str.split()
+        try:
+            hints = get_type_hints(wf.run)
+        except Exception:
+            hints = {}
+        kwargs: dict = {}
+        for param, token in zip(params, tokens):
+            ann = hints.get(param.name, str)
+            if ann is int:
+                try:
+                    token = int(token)
+                except ValueError:
+                    pass
+            elif ann is float:
+                try:
+                    token = float(token)
+                except ValueError:
+                    pass
+            kwargs[param.name] = token
+        return kwargs
+
+    def list_workflows(self, workflows: list[Workflow]) -> str:
+        """Return a formatted list of *workflows* for display."""
+        if not workflows:
+            return "No workflows registered in this domain's workflows/ folder."
+        lines = ["Available workflows:\n"]
+        for wf in sorted(workflows, key=lambda w: w.name):
+            sig = inspect.signature(wf.run)
+            params = [
+                name for name, p in sig.parameters.items()
+                if p.kind not in (
+                    inspect.Parameter.VAR_POSITIONAL,
+                    inspect.Parameter.VAR_KEYWORD,
+                )
+            ]
+            arg_hint = " " + " ".join(f"[{p}]" for p in params) if params else ""
+            lines.append(f"- /{wf.name}{arg_hint} — {wf.description}\n")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Skills  (per-domain auto-discovery)

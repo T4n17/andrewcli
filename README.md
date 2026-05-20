@@ -107,9 +107,10 @@ Andrew: Current price is $102.4/bbl — above threshold, continuing.
 | **TAB** | Cycle to the next available domain |
 | **UP / DOWN** | Navigate command history |
 | **ESC** | Stop the current generation immediately (inference cancelled, not just display) |
-| `/help` | Show built-in commands (`/clear`, `/reset`, `/events`, etc.) |
+| `/help` | Show built-in commands (`/clear`, `/reset`, `/events`, `/workflows`, etc.) |
 | `/events` | List available event types and which are running (with instance IDs) |
-| `/name [args]` | Start a named event — returns an instance ID (e.g. `loop#1`) |
+| `/workflows` | List workflows available in the active domain |
+| `/name [args]` | Start a named event or invoke a workflow — events return an instance ID, workflows stream immediately |
 | `/stop [id\|name]` | Stop by instance ID (`loop#1`) or name (stops all instances of that type) |
 | `/status` | List all events with recorded output and iteration count |
 | `/status [id]` | Show all recorded responses for a specific event instance |
@@ -127,7 +128,8 @@ Andrew: Current price is $102.4/bbl — above threshold, continuing.
 | **Clear button** | Clear the chat display (text only, memory is kept) |
 | **ESC** | Hide the panel window |
 | **▽ / △ button** | Toggle compact / expanded view |
-| `/help` | Show built-in commands (`/clear`, `/reset`, `/events`, etc.) |
+| `/help` | Show built-in commands (`/clear`, `/reset`, `/events`, `/workflows`, etc.) |
+| `/workflows` | List workflows available in the active domain |
 | `/events`, `/name [args]`, `/stop [id\|name]`, `/status [id]` | Same as CLI |
 | `/clear` | Clear the chat display (text only, memory is kept) |
 | `/reset` | Clear conversation memory (text is kept) |
@@ -142,4 +144,4 @@ Andrew: Current price is $102.4/bbl — above threshold, continuing.
 | Rolling memory and context-aware router | [doc/memory.md](doc/memory.md) |
 | Events, slash commands, ProjectEvent, LoopEvent, MonitorEvent | [doc/events.md](doc/events.md) |
 | HTTP API endpoints and curl examples | [doc/api.md](doc/api.md) |
-| Adding tools, skills, domains, and events | [doc/extending.md](doc/extending.md) |
+| Adding tools, skills, domains, events, and workflows | [doc/extending.md](doc/extending.md) |

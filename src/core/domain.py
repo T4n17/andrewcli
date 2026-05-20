@@ -62,6 +62,10 @@ class Domain:
 
         self.llm = LLM(api_base_url=self.api_base_url, model=self.model)
         self.llm.set_system_prompt(self.system_prompt)
+
+        self.workflows = registry.workflows(f"domains.{name}.workflows")
+        for wf in self.workflows:
+            wf.configure(self.llm.client, self.llm.model)
         self.router = ToolRouter(
             api_base_url=self.llm.api_base_url,
             model=self.llm.model,
@@ -158,9 +162,12 @@ class Domain:
         except Exception:
             log.exception("domain reload: failed to reload tool modules")
 
-        # Re-discover tools and skills from disk (picks up added/removed files).
+        # Re-discover tools, skills, and workflows from disk.
         self.tools = registry.tools(tools_pkg)
         self.skills = registry.skills(domain_dir / "skills")
+        self.workflows = registry.workflows(f"domains.{self.name}.workflows")
+        for wf in self.workflows:
+            wf.configure(self.llm.client, self.llm.model)
 
         # Reload system prompt if the file changed.
         new_prompt = self._load_system_prompt(domain_dir)
@@ -181,6 +188,31 @@ class Domain:
                 api_base_url=self.llm.api_base_url,
                 model=self.llm.model,
             )
+            for wf in self.workflows:
+                wf.configure(self.llm.client, self.llm.model)
+
+    # ------------------------------------------------------------------
+    # Workflows
+    # ------------------------------------------------------------------
+
+    def run_workflow(self, cmd: str):
+        """Parse ``/name [args]`` and return a streaming async generator.
+
+        Returns ``None`` when no workflow matches *cmd*. When a workflow
+        is found the returned generator acquires :attr:`busy_lock` before
+        delegating to :meth:`~src.core.workflow.Workflow.run`, so workflow
+        execution is serialised with user turns and event dispatches.
+        """
+        result = registry.parse_workflow_command(self.workflows, cmd)
+        if result is None:
+            return None
+        wf, kwargs = result
+        return self._run_workflow_gen(wf, kwargs)
+
+    async def _run_workflow_gen(self, wf, kwargs: dict):
+        async with self.busy_lock:
+            async for token in wf.run(**kwargs):
+                yield token
 
     async def generate_event(self, prompt: str):
         """One-shot generation for event dispatches.

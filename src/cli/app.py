@@ -214,6 +214,14 @@ class AndrewCLI(AndrewCore):
                     sys.stdout.write("\033[2J\033[H")
                     sys.stdout.flush()
                 if response is None:
+                    # Workflows run outside the agent loop — stream directly.
+                    wf_gen = self.domain.run_workflow(cmd)
+                    if wf_gen is not None:
+                        await self.renderer.render(wf_gen)
+                        if sid:
+                            server.finish(sid)
+                        continue
+
                     try:
                         started_event = registry.parse_slash_command(user_input)
                     except ValueError as exc:

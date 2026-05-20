@@ -34,6 +34,9 @@ src/defaults/domains/general/skills/play_music.md
 src/defaults/domains/general/skills/usa_iran_war.md
 src/defaults/domains/general/skills/read_todo.md
 
+# Private workflows
+src/defaults/domains/general/workflows/song.py
+
 #Other
 proxy/
 bot/

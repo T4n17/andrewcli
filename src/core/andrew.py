@@ -71,7 +71,9 @@ class AndrewCore:
         live_tools = self._event_live_tools[instance_id] = []
 
         try:
-            async for token in self.domain.generate_event(event.message):
+            async for token in self.domain.generate_event(
+                event.message, getattr(event, "system_message", "")
+            ):
                 if isinstance(token, str):
                     for text, is_thinking in think_filter.process(token):
                         if not is_thinking:

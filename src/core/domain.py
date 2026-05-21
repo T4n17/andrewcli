@@ -65,7 +65,7 @@ class Domain:
 
         self.workflows = registry.workflows(f"domains.{name}.workflows")
         for wf in self.workflows:
-            wf.configure(self.llm.client, self.llm.model)
+            wf.configure(self.llm.client, self.llm.model, self.tools)
         self.router = ToolRouter(
             api_base_url=self.llm.api_base_url,
             model=self.llm.model,
@@ -167,7 +167,7 @@ class Domain:
         self.skills = registry.skills(domain_dir / "skills")
         self.workflows = registry.workflows(f"domains.{self.name}.workflows")
         for wf in self.workflows:
-            wf.configure(self.llm.client, self.llm.model)
+            wf.configure(self.llm.client, self.llm.model, self.tools)
 
         # Reload system prompt if the file changed.
         new_prompt = self._load_system_prompt(domain_dir)
@@ -214,19 +214,24 @@ class Domain:
             async for token in wf.run(**kwargs):
                 yield token
 
-    async def generate_event(self, prompt: str):
+    async def generate_event(self, prompt: str, system_message: str = ""):
         """One-shot generation for event dispatches.
 
         Routes to the right tools like generate() does, but uses a fresh LLM
         with no conversation context so event exchanges never pollute the
         conversation memory or affect routing for user queries.
 
+        If `system_message` is provided it is appended to the domain system
+        prompt so event instructions carry system-level authority rather than
+        being sent as a user message.
+
         Serialized via `busy_lock` so events queue behind any in-flight
         user turn or earlier event.
         """
         async with self.busy_lock:
+            route_text = system_message or prompt
             if self.routing_enabled:
-                tools, skills = await self.router.route(prompt, self.tools, self.skills)
+                tools, skills = await self.router.route(route_text, self.tools, self.skills)
             else:
                 tools, skills = list(self.tools), list(self.skills)
 
@@ -238,9 +243,14 @@ class Domain:
                     existing_names.add(tool.name)
 
             event_llm = LLM(api_base_url=self.llm.api_base_url, model=self.llm.model)
-            event_llm.set_system_prompt(self.system_prompt)
+            if system_message:
+                combined = "\n\n".join(filter(None, [self.system_prompt, system_message]))
+                event_llm.set_system_prompt(combined)
+            else:
+                event_llm.set_system_prompt(self.system_prompt)
             yield RouteEvent([item.name for item in tools + skills])
-            async for token in event_llm.generate(prompt, tools, skills):
+            user_prompt = prompt or "Execute."
+            async for token in event_llm.generate(user_prompt, tools, skills):
                 yield token
 
     async def generate(self, prompt: str):

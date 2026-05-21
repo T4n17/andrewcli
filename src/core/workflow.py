@@ -1,3 +1,4 @@
+import asyncio
 import openai
 from abc import ABC, abstractmethod
 
@@ -41,15 +42,28 @@ class Workflow(ABC):
     def __init__(self):
         self._client: openai.AsyncOpenAI | None = None
         self._model: str | None = None
+        self._tools: list = []
 
-    def configure(self, client: openai.AsyncOpenAI, model: str) -> None:
-        """Inject the domain LLM client. Called by Domain after instantiation."""
+    def configure(self, client: openai.AsyncOpenAI, model: str, tools: list = None) -> None:
+        """Inject the domain LLM client and tools. Called by Domain after instantiation."""
         self._client = client
         self._model = model
+        self._tools = tools or []
 
     @abstractmethod
     async def run(self, **kwargs):
         """Implement the workflow as an async generator that yields str tokens."""
+
+    async def invoke_tool(self, name: str, **kwargs) -> str:
+        """Call a domain tool by name and return its result.
+
+        Runs in a thread pool so blocking I/O (subprocess, HTTP, etc.)
+        doesn't stall the event loop.
+        """
+        tool = next((t for t in self._tools if t.name == name), None)
+        if tool is None:
+            return f"[Tool Error] Tool '{name}' not found in domain."
+        return await asyncio.to_thread(tool.run, **kwargs)
 
     async def infer(self, messages: list[dict], system: str = ""):
         """Stream a single LLM inference, yielding str tokens.

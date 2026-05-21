@@ -217,7 +217,8 @@ class ProjectEvent(Event):
         self.state_file = os.path.abspath(state_file)
         self._summary_sent = False
         self._plan_sent = False
-        self._current_message: str | None = None
+        self._plan_poll_count = 0
+        self._cache: tuple[str, str] | None = None  # (system_message, user_trigger)
         # Canonical snapshot of the immutable parts of the plan. Captured
         # the first time a planned state file is read; subsequent reads are
         # reconciled against it so the agent cannot drop the goal,
@@ -384,14 +385,17 @@ class ProjectEvent(Event):
 
     # ---------------------------------------------------- dynamic message
 
-    def _compute_message(self) -> str:
+    def _compute_both(self) -> tuple[str, str]:
+        """Return (system_message, user_trigger) for the current iteration."""
         state = self._load()
 
         if state is None or not state.tasks:
             if self._plan_sent:
-                return ""
+                return "", ""
             self._plan_sent = True
-            return _PLAN_PROMPT.format(goal=self.goal, state_file=self.state_file)
+            system = _PLAN_PROMPT.format(goal=self.goal, state_file=self.state_file)
+            user = f"Write the project plan to '{self.state_file}' as instructed above, then stop."
+            return system, user
 
         tasks = state.tasks
         total = len(tasks)
@@ -402,16 +406,17 @@ class ProjectEvent(Event):
 
         if not pending:
             self._summary_sent = True
-            return _DONE_PROMPT.format(
+            system = _DONE_PROMPT.format(
                 goal=self.goal,
                 total=total,
                 constraints_block=constraints_block,
                 log_block=log_block,
                 task_list_block=self._task_list_block(state),
             )
+            return system, "Write the completion summary as instructed above."
 
         task = pending[0]
-        return _TASK_PROMPT.format(
+        system = _TASK_PROMPT.format(
             goal=self.goal,
             state_file=self.state_file,
             done=done,
@@ -423,16 +428,21 @@ class ProjectEvent(Event):
             canonical_json=state.model_dump_json(indent=2),
             task_list_block=self._task_list_block(state, current_id=task.id),
         )
+        user = f"Complete task {task.id} and update '{self.state_file}' as instructed above."
+        return system, user
+
+    def _ensure_cache(self) -> tuple[str, str]:
+        if self._cache is None:
+            self._cache = self._compute_both()
+        return self._cache
+
+    @property
+    def system_message(self) -> str:
+        return self._ensure_cache()[0]
 
     @property
     def message(self) -> str:
-        if self._current_message is None:
-            self._current_message = self._compute_message()
-        return self._current_message
-
-    @message.setter
-    def message(self, value):
-        pass
+        return self._ensure_cache()[1]
 
     # ---------------------------------------------------- event interface
 
@@ -448,11 +458,16 @@ class ProjectEvent(Event):
             self.state_file = candidate
             ProjectEvent._session_files.add(candidate)
             self._use_instance_suffix = False
-        self._current_message = None  # invalidate per-iteration cache
+        self._cache = None  # invalidate per-iteration cache
         if self._summary_sent:
             raise asyncio.CancelledError
         if self._plan_sent and self._snapshot is None:
             await asyncio.sleep(1)
+            self._plan_poll_count += 1
+            if self._plan_poll_count >= 10:
+                # Model failed to write a valid state file; re-trigger planning.
+                self._plan_sent = False
+                self._plan_poll_count = 0
 
     async def trigger(self):
         pass

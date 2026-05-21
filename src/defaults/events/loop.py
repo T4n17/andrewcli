@@ -251,7 +251,8 @@ class LoopEvent(Event):
         self.state_file = os.path.abspath(state_file)
         self._summary_sent = False
         self._plan_sent = False
-        self._current_message: str | None = None
+        self._plan_poll_count = 0  # polls since last planning dispatch
+        self._cache: tuple[str, str] | None = None  # (system_message, user_trigger)
         # Canonical snapshot of immutable fields. Captured the first time
         # a planned state file is read; subsequent reads are reconciled
         # against it so the agent cannot drop the action, exit criteria,
@@ -397,12 +398,13 @@ class LoopEvent(Event):
 
     # ---------------------------------------------------- dynamic message
 
-    def _compute_message(self) -> str:
+    def _compute_both(self) -> tuple[str, str]:
+        """Return (system_message, user_trigger) for the current iteration."""
         state = self._load()
 
         if state is None or not state.action:
             if self._plan_sent:
-                return ""
+                return "", ""
             self._plan_sent = True
             if self._user_max_iterations > 0:
                 cap_value = str(self._user_max_iterations)
@@ -417,12 +419,18 @@ class LoopEvent(Event):
                     "There is NO iteration cap. The loop runs until an "
                     "exit criterion is met. Set `max_iterations` to `null`."
                 )
-            return _PLAN_PROMPT.format(
+            system = _PLAN_PROMPT.format(
                 goal=self.goal,
                 state_file=self.state_file,
                 cap_value=cap_value,
                 cap_explanation=cap_explanation,
             )
+            user = (
+                f"Write the loop spec to '{self.state_file}' as instructed above. "
+                "If the write tool returns an error, fix the JSON and retry immediately. "
+                "Stop only once the file is confirmed written."
+            )
+            return system, user
 
         exit_block = self._exit_block(state)
         iterations = state.iterations
@@ -436,7 +444,7 @@ class LoopEvent(Event):
                 "an exit criterion was met" if terminated
                 else f"reached max_iterations ({max_iter}) without an exit criterion firing"
             )
-            return _DONE_PROMPT.format(
+            system = _DONE_PROMPT.format(
                 goal=self.goal,
                 state_file=self.state_file,
                 exit_block=exit_block,
@@ -444,6 +452,7 @@ class LoopEvent(Event):
                 termination_reason=reason,
                 last_observation=state.last_observation or "(none)",
             )
+            return system, "Write the summary paragraph as instructed above."
 
         if capped:
             iter_header = f"Iteration {iterations + 1} of up to {max_iter}."
@@ -453,23 +462,28 @@ class LoopEvent(Event):
                 f"runs until an exit criterion fires)."
             )
         canonical_json = state.model_dump_json(indent=2)
-        return _ITER_PROMPT.format(
+        system = _ITER_PROMPT.format(
             goal=self.goal,
             state_file=self.state_file,
             exit_block=exit_block,
             iter_header=iter_header,
             canonical_json=canonical_json,
         )
+        user = f"Perform the action once and write the updated state to '{self.state_file}' as instructed above."
+        return system, user
+
+    def _ensure_cache(self) -> tuple[str, str]:
+        if self._cache is None:
+            self._cache = self._compute_both()
+        return self._cache
+
+    @property
+    def system_message(self) -> str:
+        return self._ensure_cache()[0]
 
     @property
     def message(self) -> str:
-        if self._current_message is None:
-            self._current_message = self._compute_message()
-        return self._current_message
-
-    @message.setter
-    def message(self, value):
-        pass
+        return self._ensure_cache()[1]
 
     # ---------------------------------------------------- event interface
 
@@ -485,11 +499,16 @@ class LoopEvent(Event):
             self.state_file = candidate
             LoopEvent._session_files.add(candidate)
             self._use_instance_suffix = False
-        self._current_message = None  # invalidate per-iteration cache
+        self._cache = None  # invalidate per-iteration cache
         if self._summary_sent:
             raise asyncio.CancelledError
         if self._plan_sent and self._snapshot is None:
             await asyncio.sleep(1)
+            self._plan_poll_count += 1
+            if self._plan_poll_count >= 10:
+                # Model failed to write a valid state file; re-trigger planning.
+                self._plan_sent = False
+                self._plan_poll_count = 0
 
     async def trigger(self):
         pass

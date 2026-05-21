@@ -9,7 +9,8 @@ log = logging.getLogger(__name__)
 class Event(ABC):
     name: str
     description: str
-    message: str = ""  # if set, sent to the agent after trigger fires
+    message: str = ""        # if set, used as the user-turn trigger for dispatch
+    system_message: str = "" # if set, injected as system-level instructions in the fresh event LLM
 
     @abstractmethod
     async def condition(self):
@@ -127,7 +128,7 @@ class EventBus:
                 await event.trigger()
                 if self.notify:
                     self.notify(event)
-                if event.message and self.dispatch:
+                if (event.message or event.system_message) and self.dispatch:
                     await self.dispatch(event)
             except asyncio.CancelledError:
                 break

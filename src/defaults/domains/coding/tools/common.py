@@ -14,6 +14,8 @@ class WriteFile(Tool):
     description: str = "Write content to a file. Pass `content` as a string or as a JSON object — both are accepted."
 
     def execute(self, file_path: str, content) -> str:
+        if isinstance(content, dict) and "content" in content:
+            content = content["content"]
         if not isinstance(content, str):
             import json
             content = json.dumps(content, indent=2)

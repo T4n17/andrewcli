@@ -209,6 +209,123 @@ Use `ProjectEvent` for goals that decompose into a finite checklist ("build X, w
 
 ---
 
+## StatefulEvent — template for persistent multi-iteration events
+
+`StatefulEvent` is the abstract base class that powers both `ProjectEvent` and `LoopEvent`. It provides the full lifecycle scaffolding so that subclasses only implement what varies.
+
+### What it provides automatically
+
+| Concern | Mechanism |
+|---|---|
+| State file find / read / write | `_find_state_file`, `_load_raw`, `_write` |
+| Per-iteration invariant enforcement | `_reconcile()` calls `_reconcile_raw()` after each dispatch |
+| Broken-file recovery | if JSON invalid → `_salvage_progress()` → `_rebuild_raw()` → clean file |
+| Planning poll | `condition()` retries until the model writes the first state file (up to 10 polls, then re-dispatches the planning prompt) |
+| Prompt caching | `system_message` / `message` computed once per iteration via `_compute_both()` |
+| Parallel-instance collision avoidance | auto-suffix (`_1`, `_2`, …) when default file name is used |
+| Done → stop | setting `_summary_sent = True` in `_compute_both()` causes the next `condition()` to raise `CancelledError` |
+
+### Five abstract methods to implement
+
+| Method | Purpose |
+|---|---|
+| `_parse()` | Read and validate the state file against a Pydantic model; return `None` if missing or invalid |
+| `_reconcile_raw(raw)` | Given a valid JSON dict, enforce all invariants (immutable snapshot fields, monotonic counters, sticky flags); return the corrected dict |
+| `_salvage_progress(text)` | Called when the file exists but its JSON is broken; extract whatever progress can be read from the raw text and store it on `self` |
+| `_rebuild_raw()` | Return a clean, valid dict from in-memory state when the file is missing or unrecoverable |
+| `_compute_both()` | Return `(system_message, user_message)` for the current iteration; set `_plan_sent`, `_summary_sent` here |
+
+### Subclass skeleton
+
+```python
+import re
+from pydantic import BaseModel
+from src.core.event import StatefulEvent
+
+class MyState(BaseModel):
+    goal: str = ""
+    action: str = ""
+    result: str = ""
+    done: bool = False
+
+class MyEvent(StatefulEvent):
+    name = "my_event"
+    _session_files: set = set()           # must re-declare — not shared with other event types
+    _state_file_default: str = "my_state.json"
+
+    def __init__(self, goal: str = "", state_file: str = "my_state.json"):
+        self._init_state_file(goal, state_file)  # sets state_file, _snapshot, _plan_sent, etc.
+        self._done = False                        # event-specific in-memory state
+        self.goal = goal
+        self.description = f"MyEvent: {goal[:60]}"
+
+    def _parse(self) -> MyState | None:
+        raw = self._load_raw()
+        if raw is None:
+            return None
+        try:
+            return MyState.model_validate(raw)
+        except Exception:
+            return None
+
+    def _reconcile_raw(self, raw: dict) -> dict:
+        # Immutable fields come from the snapshot
+        if self._snapshot:
+            raw["goal"]   = self._snapshot["goal"]
+            raw["action"] = self._snapshot["action"]
+        # Sticky flag — once done, stays done
+        if raw.get("done"):
+            self._done = True
+        raw["done"] = self._done
+        return raw
+
+    def _salvage_progress(self, text: str) -> None:
+        # Extract whatever we can from broken JSON
+        if re.search(r'"done"\s*:\s*true', text):
+            self._done = True
+
+    def _rebuild_raw(self) -> dict:
+        snap = self._snapshot or {}
+        return {
+            "goal":   snap.get("goal",   self.goal),
+            "action": snap.get("action", ""),
+            "result": "",
+            "done":   self._done,
+        }
+
+    def _compute_both(self) -> tuple[str, str]:
+        state = self._parse()
+
+        # Planning phase — no state file yet
+        if state is None or not state.action:
+            if self._plan_sent:
+                return "", ""          # already dispatched, wait for model to write
+            self._plan_sent = True
+            system = f"Goal: {self.goal}\nWrite the initial state to {self.state_file}."
+            return system, f"Write the initial state to '{self.state_file}'."
+
+        # Capture immutable snapshot on first read
+        if self._snapshot is None:
+            self._snapshot = {"goal": state.goal, "action": state.action}
+
+        # Done — emit summary and stop
+        if self._done or state.done:
+            self._summary_sent = True
+            return "Summarise what happened.", "Write a one-paragraph summary."
+
+        # Execution — normal iteration
+        system = (
+            f"Goal: {state.goal}\n"
+            f"Action: {state.action}\n"
+            f"Perform the action and write the updated state to {self.state_file}."
+        )
+        return system, f"Perform the action and update '{self.state_file}'."
+```
+
+Drop the file in `~/.config/andrewcli/events/` — it is auto-discovered and immediately available as `/my_event [goal]`.
+
+---
+
 ## MonitorEvent — universal change-detection via shell
 
 `MonitorEvent` is the general answer to *"watch X and tell me when it changes"* for any *X* whose state can be captured by a shell command.
@@ -260,6 +377,8 @@ Every file dropped in `~/.config/andrewcli/events/` that defines a concrete `Eve
 
 ### Defining a new event
 
+**Simple (one-shot or timer-based)** — extend `Event` directly:
+
 ```python
 import asyncio
 from src.core.event import Event
@@ -278,5 +397,7 @@ class MyEvent(Event):
     async def trigger(self):
         pass  # optional side-effect before the agent message
 ```
+
+**Persistent multi-iteration (state file)** — extend `StatefulEvent` instead. See the [StatefulEvent section](#stateulevent--template-for-persistent-multi-iteration-events) above for the full skeleton and method contract.
 
 Drop the file in `~/.config/andrewcli/events/` — it is discovered automatically and immediately available as `/my_event [args]`. Events with a dynamic `message` property (computed from state rather than a fixed string) are supported: the bus reads `event.message` after `trigger()` returns.

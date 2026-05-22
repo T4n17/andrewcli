@@ -32,8 +32,9 @@ class Tool(ABC):
         for param_name, param in sig.parameters.items():
             if param_name in ("self", "args", "kwargs"):
                 continue
-            json_type = TYPE_MAP.get(param.annotation, "string")
-            properties[param_name] = {"type": json_type}
+            json_type = TYPE_MAP.get(param.annotation)
+            prop: dict = {"type": json_type} if json_type is not None else {}
+            properties[param_name] = prop
             if param.default is inspect.Parameter.empty:
                 required.append(param_name)
         return {

@@ -1,7 +1,4 @@
-import asyncio
-import glob
 import json
-import os
 from typing import Optional
 
 from pydantic import (
@@ -12,7 +9,7 @@ from pydantic import (
     field_validator,
 )
 
-from src.core.event import Event
+from src.core.event import StatefulEvent
 
 
 class LoopState(BaseModel):
@@ -194,7 +191,7 @@ or lists. Stop immediately after the paragraph — your turn is over.\
 """
 
 
-class LoopEvent(Event):
+class LoopEvent(StatefulEvent):
     """Drives the agent through a 'do X until Y is met' loop.
 
     Iteration 0 — planning:
@@ -222,6 +219,7 @@ class LoopEvent(Event):
     # Tracks state files claimed this session so parallel /loop calls
     # don't race to the same slot even before any file is written.
     _session_files: set[str] = set()
+    _state_file_default: str = "loop_state.json"
 
     def __init__(
         self,
@@ -244,21 +242,7 @@ class LoopEvent(Event):
                 file.
             state_file: Path to the JSON state file.
         """
-        self._state_file_arg = state_file
-        # Auto-suffix with instance counter when using the default name and a
-        # new goal is given, so parallel loops don't share the same file.
-        # Resume mode (no goal) deliberately keeps the explicit path as-is.
-        self._use_instance_suffix = bool(goal) and state_file == "loop_state.json"
-        self.state_file = os.path.abspath(state_file)
-        self._summary_sent = False
-        self._plan_sent = False
-        self._plan_poll_count = 0  # polls since last planning dispatch
-        self._cache: tuple[str, str] | None = None  # (system_message, user_trigger)
-        # Canonical snapshot of immutable fields. Captured the first time
-        # a planned state file is read; subsequent reads are reconciled
-        # against it so the agent cannot drop the action, exit criteria,
-        # or iteration cap.
-        self._snapshot: dict | None = None
+        self._init_state_file(goal, state_file)
         # Monotonic floor for `iterations` — never decreases.
         self._iter_floor = 0
         # Sticky termination — once True, stays True.
@@ -290,36 +274,6 @@ class LoopEvent(Event):
 
     # ------------------------------------------------------------------ state
 
-    @staticmethod
-    def _find_state_file(default_path: str) -> str | None:
-        """Return a state file path to resume from, or None if none found.
-
-        Tries the exact path first, then scans for numbered variants
-        (e.g. loop_state_1.json). Raises ValueError when multiple exist.
-        """
-        if os.path.exists(default_path):
-            return default_path
-        base, ext = os.path.splitext(default_path)
-        candidates = sorted(glob.glob(f"{base}_*{ext}"))
-        if not candidates:
-            return None
-        if len(candidates) == 1:
-            return candidates[0]
-        names = ", ".join(os.path.basename(c) for c in candidates)
-        raise ValueError(
-            f"Multiple state files found: {names}\n"
-            f"Specify which to resume, e.g.: "
-            f"/loop \"\" 0 {os.path.basename(candidates[0])}"
-        )
-
-    def _load_raw(self) -> dict | None:
-        """Read the state file verbatim as a dict, with no schema validation."""
-        try:
-            with open(self.state_file) as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return None
-
     def _parse(self) -> LoopState | None:
         """Read and parse the state file via the canonical schema."""
         raw = self._load_raw()
@@ -349,12 +303,16 @@ class LoopEvent(Event):
             return None
 
         if self._snapshot is None and parsed.action:
-            # Precedence on the cap: user-passed > disk > uncapped (None).
+            # Precedence on the cap: user-passed > uncapped (None).
+            # The model-written value is intentionally ignored: the planning
+            # prompt instructs the model to write null when no cap is set,
+            # but small LLMs often write a finite number anyway, which would
+            # silently stop the loop before any exit criterion fires.
             effective_max: Optional[int]
             if self._user_max_iterations > 0:
                 effective_max = self._user_max_iterations
             else:
-                effective_max = parsed.max_iterations  # already coerced
+                effective_max = None
             self._snapshot = {
                 "goal": parsed.goal or self.goal,
                 "action": parsed.action,
@@ -371,9 +329,12 @@ class LoopEvent(Event):
             self._iter_floor = parsed.iterations
 
         # Sticky termination + reason.
-        if parsed.terminated:
+        # Require a non-empty termination_reason so an accidental bare
+        # `"terminated": true` (without context) is treated as a model
+        # error rather than a valid exit signal.
+        if parsed.terminated and parsed.termination_reason:
             self._terminated = True
-            if parsed.termination_reason and not self._termination_reason:
+            if not self._termination_reason:
                 self._termination_reason = parsed.termination_reason
 
         # Carry through any custom scratchpad fields the agent added.
@@ -389,6 +350,101 @@ class LoopEvent(Event):
             termination_reason=self._termination_reason,
             **extras,
         )
+
+    def on_response(self, response: str) -> None:
+        """Fallback: extract JSON from model text output and save it.
+
+        Local models sometimes print the state JSON as plain text instead
+        of (or in addition to) calling write_file.  We scan the response
+        for the first JSON object that looks like a valid plan or iteration
+        update and save it directly, so the loop continues even if the
+        tool call failed or was skipped entirely.
+        """
+        # Find the outermost JSON objects in the response.
+        i = 0
+        while i < len(response):
+            start = response.find("{", i)
+            if start == -1:
+                break
+            depth = 0
+            end = start
+            for j in range(start, len(response)):
+                if response[j] == "{":
+                    depth += 1
+                elif response[j] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = j
+                        break
+            if depth != 0:
+                break
+            candidate = response[start : end + 1]
+            try:
+                data = json.loads(candidate)
+            except json.JSONDecodeError:
+                i = start + 1
+                continue
+
+            if self._snapshot is None and data.get("action"):
+                # Planning phase: save the plan so the loop can proceed.
+                # Also overwrite if the file exists but was truncated/corrupted
+                # (e.g. write_file opened it in 'w' mode then failed mid-write).
+                if self._parse() is None:
+                    with open(self.state_file, "w") as f:
+                        json.dump(data, f, indent=2)
+                return
+
+            if self._snapshot is not None and "iterations" in data and "terminated" in data:
+                # Execution phase: save if the model's text JSON represents a
+                # forward step (higher iterations than what's on disk), which
+                # happens when write_file was skipped but the model printed the
+                # correct JSON as text output.
+                current = self._parse()
+                current_iter = current.iterations if current is not None else -1
+                if data.get("iterations", -1) > current_iter:
+                    with open(self.state_file, "w") as f:
+                        json.dump(data, f, indent=2)
+                return
+
+            i = end + 1
+
+    def _reconcile_raw(self, raw: dict) -> dict:
+        """Enforce invariants on a valid raw dict and return the corrected dict."""
+        raw["goal"]           = self._snapshot["goal"]
+        raw["action"]         = self._snapshot["action"]
+        raw["exit_criteria"]  = self._snapshot["exit_criteria"]
+        raw["max_iterations"] = self._snapshot["max_iterations"]
+
+        disk_iter = raw.get("iterations")
+        if isinstance(disk_iter, int) and disk_iter > self._iter_floor:
+            self._iter_floor = disk_iter
+        raw["iterations"] = self._iter_floor
+
+        if raw.get("terminated") and str(raw.get("termination_reason", "")).strip():
+            self._terminated = True
+            if not self._termination_reason:
+                self._termination_reason = str(raw["termination_reason"])
+        raw["terminated"]         = self._terminated
+        raw["termination_reason"] = self._termination_reason
+
+        return raw
+
+    def _salvage_progress(self, text: str) -> None:
+        """No-op: iter_floor is tracked in memory independently of the file."""
+        pass
+
+    def _rebuild_raw(self) -> dict:
+        """Return a clean dict to write when the state file is missing or corrupt."""
+        return {
+            "goal": self._snapshot["goal"],
+            "action": self._snapshot["action"],
+            "exit_criteria": self._snapshot["exit_criteria"],
+            "max_iterations": self._snapshot["max_iterations"],
+            "iterations": self._iter_floor,
+            "last_observation": "",
+            "terminated": self._terminated,
+            "termination_reason": self._termination_reason,
+        }
 
     def _exit_block(self, state: LoopState | None) -> str:
         criteria = list(state.exit_criteria) if state is not None else []
@@ -473,43 +529,3 @@ class LoopEvent(Event):
         user = f"Perform the action once and write the updated state to '{self.state_file}' as instructed above."
         return system, user
 
-    def _ensure_cache(self) -> tuple[str, str]:
-        if self._cache is None:
-            self._cache = self._compute_both()
-        return self._cache
-
-    @property
-    def system_message(self) -> str:
-        return self._ensure_cache()[0]
-
-    @property
-    def message(self) -> str:
-        return self._ensure_cache()[1]
-
-    # ---------------------------------------------------- event interface
-
-    async def condition(self):
-        if self._use_instance_suffix:
-            base, ext = os.path.splitext(os.path.abspath(self._state_file_arg))
-            n = 1
-            while True:
-                candidate = f"{base}_{n}{ext}"
-                if not os.path.exists(candidate) and candidate not in LoopEvent._session_files:
-                    break
-                n += 1
-            self.state_file = candidate
-            LoopEvent._session_files.add(candidate)
-            self._use_instance_suffix = False
-        self._cache = None  # invalidate per-iteration cache
-        if self._summary_sent:
-            raise asyncio.CancelledError
-        if self._plan_sent and self._snapshot is None:
-            await asyncio.sleep(1)
-            self._plan_poll_count += 1
-            if self._plan_poll_count >= 10:
-                # Model failed to write a valid state file; re-trigger planning.
-                self._plan_sent = False
-                self._plan_poll_count = 0
-
-    async def trigger(self):
-        pass

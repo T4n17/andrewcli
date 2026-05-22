@@ -128,7 +128,13 @@ The workflow is **auto-discovered** on the next user turn — no restart require
 
 ## Add a new Event
 
-Create a file in `~/.config/andrewcli/events/` (e.g. `~/.config/andrewcli/events/my_event.py`):
+Events live in `~/.config/andrewcli/events/`. They are auto-discovered the moment the file is saved — no import or registration needed.
+
+Choose your base class based on what the event needs to do:
+
+### Simple event — extend `Event`
+
+Use this for one-shot triggers, timers, or file watchers: anything that fires once per condition and sends a fixed message.
 
 ```python
 import asyncio
@@ -150,11 +156,110 @@ class MyEvent(Event):
         pass  # optional side-effect before the agent message
 ```
 
-The event is **auto-discovered** the moment the file is saved — no import or registration needed. Activate it at runtime:
+### Persistent event — extend `StatefulEvent`
+
+Use this for any event that runs the agent through **multiple iterations** with progress tracked in a JSON file — retries, polling loops, multi-step projects, and so on. `StatefulEvent` handles the file lifecycle, broken-file repair, planning poll, and prompt caching automatically.
+
+```python
+import re
+from pydantic import BaseModel
+from src.core.event import StatefulEvent
+
+class RetryState(BaseModel):
+    goal: str = ""
+    command: str = ""
+    attempts: int = 0
+    succeeded: bool = False
+    last_output: str = ""
+
+class RetryEvent(StatefulEvent):
+    name = "retry"
+    description = "Retry a command until it succeeds"
+    _session_files: set = set()            # must be re-declared on every subclass
+    _state_file_default: str = "retry_state.json"
+
+    def __init__(self, goal: str = "", state_file: str = "retry_state.json"):
+        self._init_state_file(goal, state_file)
+        self._succeeded = False
+        self.goal = goal
+        self.description = f"Retry: {goal[:60]}"
+
+    def _parse(self) -> RetryState | None:
+        raw = self._load_raw()
+        if raw is None:
+            return None
+        try:
+            return RetryState.model_validate(raw)
+        except Exception:
+            return None
+
+    def _reconcile_raw(self, raw: dict) -> dict:
+        if self._snapshot:
+            raw["goal"]    = self._snapshot["goal"]
+            raw["command"] = self._snapshot["command"]
+        if raw.get("succeeded"):
+            self._succeeded = True
+        raw["succeeded"] = self._succeeded
+        raw["attempts"]  = max(raw.get("attempts", 0), getattr(self, "_attempts", 0))
+        self._attempts   = raw["attempts"]
+        return raw
+
+    def _salvage_progress(self, text: str) -> None:
+        if re.search(r'"succeeded"\s*:\s*true', text):
+            self._succeeded = True
+        m = re.search(r'"attempts"\s*:\s*(\d+)', text)
+        if m:
+            self._attempts = int(m.group(1))
+
+    def _rebuild_raw(self) -> dict:
+        snap = self._snapshot or {}
+        return {
+            "goal":       snap.get("goal",    self.goal),
+            "command":    snap.get("command", ""),
+            "attempts":   getattr(self, "_attempts", 0),
+            "succeeded":  self._succeeded,
+            "last_output": "",
+        }
+
+    def _compute_both(self) -> tuple[str, str]:
+        state = self._parse()
+
+        if state is None or not state.command:
+            if self._plan_sent:
+                return "", ""
+            self._plan_sent = True
+            system = f"Goal: {self.goal}\nIdentify the command and write the initial state to {self.state_file}."
+            return system, f"Write the initial state to '{self.state_file}'."
+
+        if self._snapshot is None:
+            self._snapshot = {"goal": state.goal, "command": state.command}
+            self._attempts = state.attempts
+
+        if self._succeeded or state.succeeded:
+            self._summary_sent = True
+            return "The command succeeded.", "Write a one-sentence confirmation and stop."
+
+        attempts = getattr(self, "_attempts", state.attempts)
+        system = (
+            f"Goal: {state.goal}\n"
+            f"Command: {state.command}\n"
+            f"Attempt {attempts + 1}: run the command and write the result to {self.state_file}.\n"
+            f"Set succeeded=true if it worked, leave false otherwise."
+        )
+        return system, f"Run the command and update '{self.state_file}'."
+```
+
+Activate at runtime:
 
 ```
-/my_event hello          → MyEvent("hello")
-/my_event                → MyEvent()   (uses default)
+/retry "get the build green"
+/retry                          → resume (auto-detects state file)
 ```
 
-Events are decoupled from domains — the same catalog is available everywhere and is added to the running `EventBus` dynamically via `EventBus.add()`. Events with a dynamic `message` property (computed from state rather than a fixed string) are supported: the bus reads `event.message` after `trigger()` returns.
+The five abstract methods and their full contract are documented in [events.md](events.md#stateulevent--template-for-persistent-multi-iteration-events).
+
+### Common rules for both
+
+- Events are decoupled from domains — the same catalog is available everywhere.
+- Activate with `/my_event [args]`; stop with `/stop my_event`.
+- A dynamic `message` property (computed from state) is supported — the bus reads it after `trigger()` returns.

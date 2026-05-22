@@ -1,7 +1,5 @@
-import asyncio
-import glob
 import json
-import os
+import re
 
 from pydantic import (
     AliasChoices,
@@ -11,7 +9,7 @@ from pydantic import (
     field_validator,
 )
 
-from src.core.event import Event
+from src.core.event import StatefulEvent
 
 
 class ProjectTask(BaseModel):
@@ -190,7 +188,7 @@ sections or lists. Stop immediately after the paragraph — your turn is over.\
 """
 
 
-class ProjectEvent(Event):
+class ProjectEvent(StatefulEvent):
     """Drives the agent through a multi-step project until completion.
 
     Iteration 0 — planning:
@@ -211,20 +209,10 @@ class ProjectEvent(Event):
     # Tracks state files claimed this session so parallel /project calls
     # don't race to the same slot even before any file is written.
     _session_files: set[str] = set()
+    _state_file_default: str = "project_state.json"
 
     def __init__(self, goal: str = "", state_file: str = "project_state.json"):
-        self._state_file_arg = state_file
-        self._use_instance_suffix = bool(goal) and state_file == "project_state.json"
-        self.state_file = os.path.abspath(state_file)
-        self._summary_sent = False
-        self._plan_sent = False
-        self._plan_poll_count = 0
-        self._cache: tuple[str, str] | None = None  # (system_message, user_trigger)
-        # Canonical snapshot of the immutable parts of the plan. Captured
-        # the first time a planned state file is read; subsequent reads are
-        # reconciled against it so the agent cannot drop the goal,
-        # constraints, or task structure.
-        self._snapshot: dict | None = None
+        self._init_state_file(goal, state_file)
         # Monotonic log floor — only grows, never shrinks, so accidental
         # truncation by the agent is silently undone on the next read.
         self._log_floor: list[str] = []
@@ -250,36 +238,6 @@ class ProjectEvent(Event):
         self.description = f"Project: {goal[:60]}"
 
     # ------------------------------------------------------------------ state
-
-    @staticmethod
-    def _find_state_file(default_path: str) -> str | None:
-        """Return a state file path to resume from, or None if none found.
-
-        Tries the exact path first, then scans for numbered variants
-        (e.g. project_state_1.json). Raises ValueError when multiple exist.
-        """
-        if os.path.exists(default_path):
-            return default_path
-        base, ext = os.path.splitext(default_path)
-        candidates = sorted(glob.glob(f"{base}_*{ext}"))
-        if not candidates:
-            return None
-        if len(candidates) == 1:
-            return candidates[0]
-        names = ", ".join(os.path.basename(c) for c in candidates)
-        raise ValueError(
-            f"Multiple state files found: {names}\n"
-            f"Specify which to resume, e.g.: "
-            f"/project \"\" {os.path.basename(candidates[0])}"
-        )
-
-    def _load_raw(self) -> dict | None:
-        """Read the state file verbatim as a dict, with no schema validation."""
-        try:
-            with open(self.state_file) as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return None
 
     def _parse(self) -> ProjectState | None:
         """Read and parse the state file via the canonical schema."""
@@ -357,6 +315,96 @@ class ProjectEvent(Event):
             **state_extras,
         )
 
+    def on_response(self, response: str) -> None:
+        """Fallback: save the project plan from model text output.
+
+        If the model printed the plan JSON as plain text rather than calling
+        write_file, we extract it here so planning doesn't stall.
+        """
+        if self._snapshot is not None:
+            return  # planning already complete
+        i = 0
+        while i < len(response):
+            start = response.find("{", i)
+            if start == -1:
+                break
+            depth = 0
+            end = start
+            for j in range(start, len(response)):
+                if response[j] == "{":
+                    depth += 1
+                elif response[j] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = j
+                        break
+            if depth != 0:
+                break
+            candidate = response[start : end + 1]
+            try:
+                data = json.loads(candidate)
+            except json.JSONDecodeError:
+                i = start + 1
+                continue
+            tasks = data.get("tasks")
+            if isinstance(tasks, list) and tasks:
+                if self._parse() is None:
+                    with open(self.state_file, "w") as f:
+                        json.dump(data, f, indent=2)
+                return
+            i = end + 1
+
+    def _reconcile_raw(self, raw: dict) -> dict:
+        """Enforce invariants on a valid raw dict and return the corrected dict."""
+        raw["goal"]        = self._snapshot["goal"]
+        raw["constraints"] = self._snapshot["constraints"]
+
+        disk_tasks_by_id: dict[str, dict] = {}
+        for t in raw.get("tasks", []):
+            if isinstance(t, dict) and "id" in t:
+                disk_tasks_by_id[str(t["id"])] = t
+
+        canonical_tasks = []
+        for tid, title in self._snapshot["task_titles"]:
+            disk = disk_tasks_by_id.get(tid, {})
+            if disk.get("done"):
+                self._snapshot["done_ids"].add(tid)
+            is_done = tid in self._snapshot["done_ids"]
+            task: dict = {"id": tid, "title": title, "done": is_done}
+            for k, v in disk.items():
+                if k not in ("id", "title", "done"):
+                    task[k] = v
+            canonical_tasks.append(task)
+        raw["tasks"] = canonical_tasks
+
+        disk_log = raw.get("log", [])
+        if isinstance(disk_log, list) and len(disk_log) > len(self._log_floor):
+            self._log_floor = [str(e) for e in disk_log if isinstance(e, str)]
+        raw["log"] = self._log_floor
+
+        return raw
+
+    def _salvage_progress(self, text: str) -> None:
+        """Extract done task IDs from invalid JSON text and update in-memory state."""
+        for m in re.finditer(r'"done"\s*:\s*true', text):
+            prefix = text[max(0, m.start() - 200) : m.start()]
+            id_match = re.search(r'"id"\s*:\s*"?([^",}\s]+)"?', prefix)
+            if id_match:
+                self._snapshot["done_ids"].add(id_match.group(1))
+
+    def _rebuild_raw(self) -> dict:
+        """Return a clean dict to write when the state file is missing or corrupt."""
+        tasks = [
+            {"id": tid, "title": title, "done": tid in self._snapshot["done_ids"]}
+            for tid, title in self._snapshot["task_titles"]
+        ]
+        return {
+            "goal": self._snapshot["goal"],
+            "constraints": self._snapshot["constraints"],
+            "tasks": tasks,
+            "log": self._log_floor,
+        }
+
     def _all_done(self) -> bool:
         state = self._load()
         return state is not None and bool(state.tasks) and all(t.done for t in state.tasks)
@@ -432,43 +480,3 @@ class ProjectEvent(Event):
         user = f"Complete task {task.id} and update '{self.state_file}' as instructed above."
         return system, user
 
-    def _ensure_cache(self) -> tuple[str, str]:
-        if self._cache is None:
-            self._cache = self._compute_both()
-        return self._cache
-
-    @property
-    def system_message(self) -> str:
-        return self._ensure_cache()[0]
-
-    @property
-    def message(self) -> str:
-        return self._ensure_cache()[1]
-
-    # ---------------------------------------------------- event interface
-
-    async def condition(self):
-        if self._use_instance_suffix:
-            base, ext = os.path.splitext(os.path.abspath(self._state_file_arg))
-            n = 1
-            while True:
-                candidate = f"{base}_{n}{ext}"
-                if not os.path.exists(candidate) and candidate not in ProjectEvent._session_files:
-                    break
-                n += 1
-            self.state_file = candidate
-            ProjectEvent._session_files.add(candidate)
-            self._use_instance_suffix = False
-        self._cache = None  # invalidate per-iteration cache
-        if self._summary_sent:
-            raise asyncio.CancelledError
-        if self._plan_sent and self._snapshot is None:
-            await asyncio.sleep(1)
-            self._plan_poll_count += 1
-            if self._plan_poll_count >= 10:
-                # Model failed to write a valid state file; re-trigger planning.
-                self._plan_sent = False
-                self._plan_poll_count = 0
-
-    async def trigger(self):
-        pass

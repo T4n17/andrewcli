@@ -11,9 +11,9 @@ class GetCurrentDate(Tool):
 
 class WriteFile(Tool):
     name: str = "write_file"
-    description: str = "Write content to a file."
+    description: str = "Write content to a file. Pass `content` as a string or as a JSON object — both are accepted."
 
-    def execute(self, file_path: str, content: str) -> str:
+    def execute(self, file_path: str, content) -> str:
         if not isinstance(content, str):
             import json
             content = json.dumps(content, indent=2)

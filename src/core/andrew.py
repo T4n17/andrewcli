@@ -115,6 +115,11 @@ class AndrewCore:
         tools_used = self._event_live_tools.pop(instance_id, [])
         self._event_live.pop(instance_id, None)
         response = "".join(parts).strip()
+        if response and hasattr(event, "on_response"):
+            try:
+                event.on_response(response)
+            except Exception:
+                pass
         log = self._event_log.setdefault(instance_id, [])
         log.append(response)
         tool_log = self._event_tool_log.setdefault(instance_id, [])

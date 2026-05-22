@@ -72,7 +72,8 @@ class AndrewCore:
 
         try:
             async for token in self.domain.generate_event(
-                event.message, getattr(event, "system_message", "")
+                event.message, getattr(event, "system_message", ""),
+                required_tools=getattr(event, "required_tools", []),
             ):
                 if isinstance(token, str):
                     for text, is_thinking in think_filter.process(token):

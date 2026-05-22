@@ -11,6 +11,7 @@ class Event(ABC):
     description: str
     message: str = ""        # if set, used as the user-turn trigger for dispatch
     system_message: str = "" # if set, injected as system-level instructions in the fresh event LLM
+    required_tools: list[str] = []  # tool names that must be available regardless of routing
 
     @abstractmethod
     async def condition(self):

@@ -214,7 +214,7 @@ class Domain:
             async for token in wf.run(**kwargs):
                 yield token
 
-    async def generate_event(self, prompt: str, system_message: str = ""):
+    async def generate_event(self, prompt: str, system_message: str = "", required_tools: list[str] | None = None):
         """One-shot generation for event dispatches.
 
         Routes to the right tools like generate() does, but uses a fresh LLM
@@ -237,6 +237,8 @@ class Domain:
 
             existing_names = {t.name for t in tools}
             required_names = {name for s in skills for name in s.required_tools}
+            if required_tools:
+                required_names.update(required_tools)
             for tool in self.tools:
                 if tool.name in required_names and tool.name not in existing_names:
                     tools.append(tool)

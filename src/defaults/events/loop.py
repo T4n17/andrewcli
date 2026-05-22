@@ -218,6 +218,7 @@ class LoopEvent(Event):
     """
 
     name = "loop"
+    required_tools = ["write_file"]
     # Tracks state files claimed this session so parallel /loop calls
     # don't race to the same slot even before any file is written.
     _session_files: set[str] = set()

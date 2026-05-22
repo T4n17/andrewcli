@@ -12,8 +12,11 @@ class GetCurrentDate(Tool):
 class WriteFile(Tool):
     name: str = "write_file"
     description: str = "Write content to a file."
-    
+
     def execute(self, file_path: str, content: str) -> str:
+        if not isinstance(content, str):
+            import json
+            content = json.dumps(content, indent=2)
         with open(file_path, "w") as f:
             f.write(content)
         return f"File {file_path} written successfully."

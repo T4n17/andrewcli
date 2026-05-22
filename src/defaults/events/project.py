@@ -207,6 +207,7 @@ class ProjectEvent(Event):
     """
 
     name = "project"
+    required_tools = ["write_file"]
     # Tracks state files claimed this session so parallel /project calls
     # don't race to the same slot even before any file is written.
     _session_files: set[str] = set()

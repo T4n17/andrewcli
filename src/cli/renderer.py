@@ -4,7 +4,7 @@ import sys
 import termios
 import tty
 
-from src.core.llm import ToolEvent, RouteEvent, format_tool_status
+from src.core.llm import ToolEvent, ToolResultEvent, RouteEvent, format_tool_status
 from src.cli.animations import Spinner
 from src.cli.filter import ThinkFilter
 
@@ -26,7 +26,7 @@ class StreamRenderer:
         async def _consume():
             first = True
             async for token in token_stream:
-                if isinstance(token, (RouteEvent, ToolEvent)):
+                if isinstance(token, (RouteEvent, ToolEvent, ToolResultEvent)):
                     status = format_tool_status(token)
                     if isinstance(token, ToolEvent):
                         sys.stdout.write("\r\033[K")

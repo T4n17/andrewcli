@@ -176,21 +176,6 @@ Any edits to these will be silently overwritten on the next iteration.
 They are preserved verbatim every iteration.\
 """
 
-_DONE_PROMPT = """\
-Loop goal: {goal}
-{exit_block}\
-## Loop complete — {iterations} iteration(s) run
-
-  Termination reason : {termination_reason}
-  Last observation   : {last_observation}
-
-Write ONE short paragraph (2-4 sentences): what happened across the run, \
-which exit criterion triggered (or that the iteration cap was reached), and \
-that the loop is complete. Do not repeat yourself. Do not add extra sections \
-or lists. Stop immediately after the paragraph — your turn is over.\
-"""
-
-
 class LoopEvent(StatefulEvent):
     """Drives the agent through a 'do X until Y is met' loop.
 
@@ -203,9 +188,9 @@ class LoopEvent(StatefulEvent):
         observation, and flips `terminated` to true if any exit criterion
         is met.
 
-    Final iteration:
-        Either an exit criterion fired or `max_iterations` was reached.
-        The agent is asked for a summary, then the event stops.
+    Completion:
+        Once an exit criterion fires or `max_iterations` is reached, the event
+        stops without another model call.
 
     State management mirrors `ProjectEvent`: an in-memory snapshot of the
     immutable fields (`goal`, `action`, `exit_criteria`, `max_iterations`)
@@ -463,6 +448,7 @@ class LoopEvent(StatefulEvent):
             if self._plan_sent:
                 return "", ""
             self._plan_sent = True
+            self.silent = True
             if self._user_max_iterations > 0:
                 cap_value = str(self._user_max_iterations)
                 cap_explanation = (
@@ -497,20 +483,9 @@ class LoopEvent(StatefulEvent):
 
         if terminated or (capped and iterations >= max_iter):
             self._summary_sent = True
-            reason = state.termination_reason or (
-                "an exit criterion was met" if terminated
-                else f"reached max_iterations ({max_iter}) without an exit criterion firing"
-            )
-            system = _DONE_PROMPT.format(
-                goal=self.goal,
-                state_file=self.state_file,
-                exit_block=exit_block,
-                iterations=iterations,
-                termination_reason=reason,
-                last_observation=state.last_observation or "(none)",
-            )
-            return system, "Write the summary paragraph as instructed above."
+            return "", ""
 
+        self.silent = False
         if capped:
             iter_header = f"Iteration {iterations + 1} of up to {max_iter}."
         else:

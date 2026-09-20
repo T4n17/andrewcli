@@ -31,9 +31,9 @@ class AndrewCore:
         ignores it (already streamed via ``_on_event_token``).
 
     ``_on_event_done(instance_id)``
-        Called unconditionally when dispatch ends (success, error, or
-        cancellation).  The tray uses this to put the ``None`` sentinel into
-        its token queue so Qt knows the stream is over; the CLI ignores it.
+        Called when a visible dispatch ends (success, error, or cancellation).
+        The tray uses this to put the ``None`` sentinel into its token queue so
+        Qt knows the stream is over; the CLI ignores it.
     """
 
     def __init__(self) -> None:
@@ -65,6 +65,7 @@ class AndrewCore:
         if sid:
             event._bridge_sid = None
 
+        is_silent = getattr(event, "silent", False)
         think_filter = ThinkFilter()
         parts: list[str] = []
         live = self._event_live[instance_id] = []
@@ -93,20 +94,23 @@ class AndrewCore:
                         if tc["name"] == token.tool_name and tc["result"] is None:
                             tc["result"] = token.result
                             break
-                self._on_event_token(instance_id, token)
+                if not is_silent:
+                    self._on_event_token(instance_id, token)
         except asyncio.CancelledError:
             self._event_live.pop(instance_id, None)
             self._event_live_tools.pop(instance_id, None)
             if sid:
                 server.finish(sid, error="Event stopped")
-            self._on_event_done(instance_id)
+            if not is_silent:
+                self._on_event_done(instance_id)
             raise
         except Exception as e:
             self._event_live.pop(instance_id, None)
             self._event_live_tools.pop(instance_id, None)
             if sid:
                 server.finish(sid, error=str(e))
-            self._on_event_done(instance_id)
+            if not is_silent:
+                self._on_event_done(instance_id)
             return
         else:
             if sid:
@@ -128,8 +132,9 @@ class AndrewCore:
             log.pop(0)
             tool_log.pop(0)
 
-        self._on_event_output(instance_id, event.description, response)
-        self._on_event_done(instance_id)
+        if not is_silent:
+            self._on_event_output(instance_id, event.description, response)
+            self._on_event_done(instance_id)
 
     # ------------------------------------------------------------------
     # Slash command handling  (/events  /stop  /status)

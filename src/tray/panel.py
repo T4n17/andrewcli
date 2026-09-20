@@ -129,6 +129,8 @@ class ChatPanel(QWidget):
 
         self._browser = QTextBrowser()
         self._browser.setOpenExternalLinks(True)
+        self._browser.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._browser.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._browser.document().setDefaultStyleSheet(self._md_css)
         # Attach emoji fallback fonts to the document default so they render
         # correctly inside setMarkdown (CSS font-family only applies to HTML

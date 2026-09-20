@@ -137,9 +137,11 @@ class EventBus:
             try:
                 await event.condition()
                 await event.trigger()
-                if self.notify:
+                message = event.message
+                system_message = event.system_message
+                if self.notify and not getattr(event, "silent", False):
                     self.notify(event)
-                if (event.message or event.system_message) and self.dispatch:
+                if (message or system_message) and self.dispatch:
                     await self.dispatch(event)
             except asyncio.CancelledError:
                 break
@@ -205,6 +207,7 @@ class StatefulEvent(Event):
         self._plan_poll_count: int = 0
         self._cache: tuple[str, str] | None = None
         self._snapshot: dict | None = None
+        self.silent: bool = False
 
     # ------------------------------------------------------------------ file I/O
 

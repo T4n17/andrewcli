@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 
 _SUPPORTED_SUFFIXES = {
     ".bmp", ".docx", ".htm", ".html", ".jpeg", ".jpg", ".md",
-    ".pdf", ".png", ".tif", ".tiff", ".txt", ".webp",
+    ".pdf", ".png", ".pptx", ".tif", ".tiff", ".txt", ".webp",
 }
 _ML_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".pdf", ".png", ".tif", ".tiff", ".webp"}
 _TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)

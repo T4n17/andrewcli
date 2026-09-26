@@ -59,7 +59,7 @@ server:
 
 ### Knowledge base
 
-Place documents in the active domain's `~/.config/andrewcli/domains/<name>/knowledgebase/` folder. PDF, DOCX, HTML, Markdown, text, and common image formats are parsed locally; scanned pages and images use local OCR, and table rows retain column/value associations. AndrewCLI combines contextual BM25 with multilingual dense retrieval, fuses both rankings, and applies a local cross-encoder before returning four cited excerpts. Changed files are refreshed automatically.
+Place documents in the active domain's `~/.config/andrewcli/domains/<name>/knowledgebase/` folder. PDF, DOCX, PPTX, HTML, Markdown, text, and common image formats are parsed locally; scanned pages and images use local OCR, and table rows retain column/value associations. AndrewCLI combines contextual BM25 with multilingual dense retrieval, fuses both rankings, and applies a local cross-encoder before returning four cited excerpts. Changed files are refreshed automatically.
 
 Extracted chunks, file fingerprints, and float32 embeddings are cached in `~/.cache/andrewcli/rag/<domain>.sqlite3`. Unchanged files reload without Docling parsing or embedding generation; changed documents are updated incrementally in a transaction. SQLite FTS5 provides persistent BM25 search. Dense retrieval uses exact batched scans for small collections and disk-backed, memory-mapped USearch HNSW shards above `ann_threshold`, so query memory remains bounded as the corpus grows. Set `cache_enabled: false` to restore the legacy fully in-memory behavior.
 

@@ -8,9 +8,10 @@ import yaml
 
 from src.core.event import EventBus
 from src.core.llm import LLM, RouteEvent
+from src.core.rag import KnowledgeBase
 from src.core.registry import registry
 from src.core.router import ToolRouter
-from src.shared.paths import DOMAINS_DIR
+from src.shared.paths import DOMAINS_DIR, RAG_CACHE_DIR
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ class Domain:
     * ``system_prompt.md`` — optional, system prompt text.
     * ``tools/*.py``       — optional, :class:`Tool` subclasses.
     * ``skills/*.md``      — optional, frontmatter-driven skills.
+    * ``knowledgebase/``   — optional, documents retrieved for user turns.
 
     There is no longer a per-domain Python class: the same ``Domain``
     instance is reused for every domain, parametrised by ``name``.
@@ -70,6 +72,39 @@ class Domain:
             api_base_url=self.llm.api_base_url,
             model=self.llm.model,
         )
+        from src.shared.config import Config
+        cfg = Config()
+        self.rag = KnowledgeBase(
+            self._domain_dir / "knowledgebase",
+            enabled=getattr(cfg, "rag_enabled", True),
+            top_sections=getattr(cfg, "rag_top_sections", 5),
+            top_chunks=getattr(cfg, "rag_top_chunks", 4),
+            max_context_chars=getattr(cfg, "rag_max_context_chars", 8000),
+            reranker_model=getattr(
+                cfg,
+                "rag_reranker_model",
+                "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+            ),
+            rerank_candidates=getattr(cfg, "rag_rerank_candidates", 48),
+            embedding_model=getattr(
+                cfg,
+                "rag_embedding_model",
+                "intfloat/multilingual-e5-small",
+            ),
+            dense_candidates=getattr(cfg, "rag_dense_candidates", 48),
+            cache_path=(
+                RAG_CACHE_DIR / f"{name}.sqlite3"
+                if getattr(cfg, "rag_cache_enabled", True)
+                else None
+            ),
+            ann_threshold=getattr(cfg, "rag_ann_threshold", 50000),
+            ann_shard_size=getattr(cfg, "rag_ann_shard_size", 100000),
+            watch=getattr(cfg, "rag_watch", True),
+        )
+        try:
+            self.rag.start()
+        except RuntimeError:
+            pass
         # Events are independent of domains — they're registered
         # dynamically via slash commands (``/timer 30`` etc.). The bus
         # starts empty and picks them up through ``EventBus.add()``.
@@ -191,6 +226,10 @@ class Domain:
             for wf in self.workflows:
                 wf.configure(self.llm.client, self.llm.model)
 
+    def close(self) -> None:
+        self.event_bus.stop()
+        self.rag.stop()
+
     # ------------------------------------------------------------------
     # Workflows
     # ------------------------------------------------------------------
@@ -261,6 +300,13 @@ class Domain:
         # closed early via aclose()). See `busy_lock` docstring.
         async with self.busy_lock:
             self.reload()
+            context = await self.rag.retrieve(
+                prompt,
+                previous_query=self.llm.memory.last_user_prompt,
+            )
+            knowledge_tools = self.rag.agent_tools()
+            if knowledge_tools:
+                context = "\n\n".join(filter(None, [context, self.rag.agent_guidance()]))
             if self.routing_enabled:
                 tools, skills = await self.router.route(
                     prompt, self.tools, self.skills,
@@ -277,7 +323,11 @@ class Domain:
                 if tool.name in required_names and tool.name not in existing_names:
                     tools.append(tool)
                     existing_names.add(tool.name)
+            for tool in knowledge_tools:
+                if tool.name not in existing_names:
+                    tools.append(tool)
+                    existing_names.add(tool.name)
 
             yield RouteEvent([item.name for item in tools + skills])
-            async for token in self.llm.generate(prompt, tools, skills):
+            async for token in self.llm.generate(prompt, tools, skills, context=context):
                 yield token

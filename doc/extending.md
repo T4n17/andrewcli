@@ -55,8 +55,9 @@ Create a new folder under `~/.config/andrewcli/domains/` (e.g. `~/.config/andrew
 ├── tools/                 # optional — auto-discovered *.py
 │   └── __init__.py
 ├── skills/                # optional — auto-discovered *.md
-└── workflows/             # optional — auto-discovered *.py
-    └── __init__.py
+├── workflows/             # optional — auto-discovered *.py
+│   └── __init__.py
+└── knowledgebase/         # optional — documents retrieved for user turns
 ```
 
 No Python subclass is required — the folder *is* the domain. Write `system_prompt.md`:

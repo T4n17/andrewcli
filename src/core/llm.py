@@ -68,7 +68,7 @@ class LLM:
     def set_system_prompt(self, prompt: str):
         self.memory.add({"role": "system", "content": prompt})
 
-    async def generate(self, prompt: str, tools: List[Tool] = None, skills: List[Skill] = None, max_rounds: int = 50):
+    async def generate(self, prompt: str, tools: List[Tool] = None, skills: List[Skill] = None, max_rounds: int = 50, context: str = ""):
         self.memory.add({"role": "user", "content": prompt})
         # Record where in the message list the current turn begins (the user
         # message we just appended). Used to strip prior-turn history when a
@@ -86,6 +86,7 @@ class LLM:
         # so intermediate tool-call chains never leak into the long-term history.
         _saved_messages: list | None = None
         _skill_active = False
+        _turn_scoped_used = False
 
         # Everything below runs inside a try/finally so the turn-scoped
         # active-skill blocks in Memory are always cleared at turn end,
@@ -96,7 +97,7 @@ class LLM:
         try:
             last_content = ""
             for _ in range(max_rounds):
-                kwargs = {"model": self.model, "messages": self.memory.get(), "stream": True}
+                kwargs = {"model": self.model, "messages": self.memory.get(context), "stream": True}
                 if all_schemas:
                     kwargs["tools"] = all_schemas
                 try:
@@ -146,6 +147,8 @@ class LLM:
                             {"role": "assistant", "content": content},
                         ]
                         _saved_messages = None  # signal finally that restore is done
+                    if _turn_scoped_used:
+                        self._strip_turn_scoped_tools(turn_start_idx, all_callables)
                     await self.memory.summarize_turn(self.client, self.summary_model)
                     return
 
@@ -170,8 +173,16 @@ class LLM:
                         args = json.loads(tc["arguments"]) if tc.get("arguments") else {}
                     except json.JSONDecodeError:
                         args = {}
+                    callable_obj = next(
+                        (c for c in all_callables if c.name == tc["name"]),
+                        None,
+                    )
+                    if getattr(callable_obj, "turn_scoped", False):
+                        _turn_scoped_used = True
                     yield ToolEvent(tc["name"], args)
-                    await asyncio.sleep(2)
+                    delay = getattr(callable_obj, "execution_delay", 2.0)
+                    if delay:
+                        await asyncio.sleep(delay)
 
                     # Skills deliver scripted instructions rather than real
                     # side effects, so we promote their body into the system
@@ -180,10 +191,6 @@ class LLM:
                     # This makes the model treat the steps as binding
                     # system-level instructions instead of optional
                     # reference material buried in a tool response.
-                    callable_obj = next(
-                        (c for c in all_callables if c.name == tc["name"]),
-                        None,
-                    )
                     if isinstance(callable_obj, Skill):
                         if not _skill_active:
                             _skill_active = True
@@ -227,6 +234,8 @@ class LLM:
                     {"role": "assistant", "content": fallback},
                 ]
                 _saved_messages = None  # signal finally that restore is done
+            if _turn_scoped_used:
+                self._strip_turn_scoped_tools(turn_start_idx, all_callables)
             await self.memory.summarize_turn(self.client, self.summary_model)
         finally:
             # Turn scope ends here for every exit path (normal return,
@@ -235,11 +244,40 @@ class LLM:
             # blocks so they don't leak into the next user turn's
             # system prompt.
             self.memory.clear_active_skills()
+            if _turn_scoped_used:
+                self._strip_turn_scoped_tools(turn_start_idx, all_callables)
             if _skill_active and _saved_messages is not None:
                 # Generator was closed before the skill completed (user stopped
                 # mid-execution). Restore the pre-skill conversation so the
                 # history isn't left in the stripped current-turn-only state.
                 self.memory.messages = _saved_messages
+
+    def _strip_turn_scoped_tools(self, start: int, tools: list) -> None:
+        names = {tool.name for tool in tools if getattr(tool, "turn_scoped", False)}
+        call_ids = {
+            call.get("id")
+            for message in self.memory.messages[start:]
+            for call in message.get("tool_calls", [])
+            if call.get("function", {}).get("name") in names
+        }
+        kept = self.memory.messages[:start]
+        for message in self.memory.messages[start:]:
+            if message.get("role") == "tool" and message.get("tool_call_id") in call_ids:
+                continue
+            if message.get("role") == "assistant" and message.get("tool_calls"):
+                remaining = [
+                    call for call in message["tool_calls"]
+                    if call.get("id") not in call_ids
+                ]
+                if not remaining and not message.get("content"):
+                    continue
+                message = dict(message)
+                if remaining:
+                    message["tool_calls"] = remaining
+                else:
+                    message.pop("tool_calls", None)
+            kept.append(message)
+        self.memory.messages = kept
 
     def _execute_tool_call_from_dict(self, tool_call: dict, tools: list) -> str:
         func_name = tool_call["name"]

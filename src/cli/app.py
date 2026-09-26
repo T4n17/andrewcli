@@ -51,8 +51,10 @@ class AndrewCLI(AndrewCore):
             new_domain = registry.load_domain(next_name)
         except ValueError:
             return
+        old_domain = self.domain
         self.domain = new_domain
         self.domain_name = next_name
+        old_domain.close()
 
     async def _read_input(self, prompt):
         self._current_prompt = prompt
@@ -175,6 +177,7 @@ class AndrewCLI(AndrewCore):
     # ------------------------------------------------------------------
 
     async def run(self):
+        self.domain.rag.start()
         print("Andrew is running...")
         self.domain.event_bus.notify = self._event_notify
         self.domain.event_bus.dispatch = self._event_dispatch

@@ -14,6 +14,21 @@ memory:
   # verbatim into the rolling summary; longer turns trigger an LLM merge call.
   min_summary_chars: 200
 
+# --- Knowledge retrieval -----------------------------------------------------
+rag:
+  enabled: true
+  top_sections: 5
+  top_chunks: 4
+  max_context_chars: 8000
+  reranker_model: "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+  rerank_candidates: 48
+  embedding_model: "intfloat/multilingual-e5-small"
+  dense_candidates: 48
+  cache_enabled: true
+  ann_threshold: 50000
+  ann_shard_size: 100000
+  watch: true
+
 # --- HTTP bridge ------------------------------------------------------------
 # Auto-start the FastAPI server alongside the CLI/tray so external clients
 # can POST to /chat. Disable to keep the agent fully local. Has no effect

@@ -66,9 +66,22 @@ class Memory:
         """Drop all turn-scoped skill annotations. Called at turn end."""
         self._active_skills = []
 
-    def get(self) -> list:
+    @property
+    def last_user_prompt(self) -> str:
+        return next(
+            (
+                message.get("content", "")
+                for message in reversed(self.messages)
+                if message.get("role") == "user" and message.get("content")
+            ),
+            "",
+        )
+
+    def get(self, context: str = "") -> list:
         result = []
         sys_content = self.system_prompt or ""
+        if context:
+            sys_content += f"\n\n{context}"
         if self.summary:
             sys_content += f"\n\n<memory>\n{self.summary}\n</memory>"
         if self._trimmed:

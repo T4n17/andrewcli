@@ -14,6 +14,8 @@ TYPE_MAP = {
 class Tool(ABC):
     name: str
     description: str
+    turn_scoped: bool = False
+    execution_delay: float = 2.0
     
     @abstractmethod
     def execute(self, *args, **kwargs):

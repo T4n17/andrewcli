@@ -161,6 +161,20 @@ class AndrewCore:
         if cmd == "/workflows":
             return registry.list_workflows(self.domain.workflows)
 
+        if cmd in ("/rag", "/rag status"):
+            return self.domain.rag.status()
+
+        if cmd == "/rag metrics":
+            return self.domain.rag.metrics()
+
+        if cmd == "/rag reindex":
+            if self.domain.rag.request_refresh(force=True):
+                return "✓ Knowledge base reindex started."
+            return "Knowledge base indexer is not running."
+
+        if cmd.startswith("/rag"):
+            return "Usage: /rag status | /rag metrics | /rag reindex"
+
         if cmd.startswith("/stop"):
             parts = cmd.split(None, 1)
             if len(parts) == 1:

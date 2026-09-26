@@ -20,7 +20,8 @@ AndrewCLI separates **shipped code** (the Python package) from **runtime configu
         ├── system_prompt.md        # Domain prompt
         ├── tools/                  # Tool subclasses auto-loaded from *.py
         │   └── common.py
-        └── skills/                 # Skill markdown files auto-loaded as Skill instances
+        ├── skills/                 # Skill markdown files auto-loaded as Skill instances
+        └── knowledgebase/          # Persistent hybrid and agentic retrieval
 
 AndrewCLI/                          # Installed package (this repository)
 ├── andrewcli.py                    # Unified entry point (CLI, tray, server)
@@ -79,8 +80,9 @@ A **Domain** is a folder under `~/.config/andrewcli/domains/<name>/` that groups
 - **System prompt** — loaded from `domains/<name>/system_prompt.md`. Plain markdown, no frontmatter.
 - **Tools** — auto-discovered from `domains/<name>/tools/*.py` (every concrete `Tool` subclass is instantiated and registered).
 - **Skills** — auto-discovered from `domains/<name>/skills/*.md`.
+- **Knowledge base** — documents under `domains/<name>/knowledgebase/` are parsed locally. Retrieval preserves heading paths and table column/value associations, fuses SQLite FTS5 BM25 with multilingual dense search, and applies a local multilingual cross-encoder before injecting the best excerpts only for the current user turn. Per-domain SQLite stores under `~/.cache/andrewcli/rag/` update changed documents transactionally. Dense search is exact below the configured threshold and uses persistent, memory-mapped USearch HNSW shards above it, keeping query memory and latency bounded for large collections. Every normal turn also receives internal, always-available knowledge tools for bounded iterative search, source/section filtering, neighboring-chunk lookup, and deterministic arithmetic. Their intermediate evidence is removed before conversation summarization.
 
-All four are **reloaded before every user turn** via `Domain.reload()`. Tool modules are re-imported with `importlib.reload`, skill files are re-scanned from disk, the system prompt and `config.yaml` are re-read. Flipping `routing_enabled` or pointing the domain at a new endpoint takes effect immediately — no restart required. If `api_base_url` or `model` changes, a new LLM client is created and the existing conversation memory is transplanted into it. Memory and the event bus are never touched by a reload.
+Domain configuration is **reloaded before every user turn** via `Domain.reload()`. Tool modules are re-imported with `importlib.reload`, skill files are re-scanned from disk, the system prompt and `config.yaml` are re-read. Flipping `routing_enabled` or pointing the domain at a new endpoint takes effect immediately — no restart required. If `api_base_url` or `model` changes, a new LLM client is created and the existing conversation memory is transplanted into it. Memory and the event bus are never touched by a reload.
 
 The active domain is chosen from the global `config.yaml` (`domain: "general"`) and can be **switched at runtime** with TAB. Domains can optionally override the global LLM endpoint and model per-domain.
 

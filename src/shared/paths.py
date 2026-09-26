@@ -9,6 +9,8 @@ against fixed roots, regardless of the process' later cwd:
   ``~/.config/andrewcli/``. Hosts the global ``config.yaml`` plus the
   user-customizable ``domains/`` and ``events/`` trees. Created and
   seeded from the bundled defaults on first import.
+* ``CACHE_DIR`` — disposable generated data under the platform cache root,
+  including per-domain RAG extraction and embedding caches.
 * ``LAUNCH_DIR`` — the directory the user was in when they ran
   ``andrewcli``. All *per-project* runtime state (memory, tray log,
   event state files) lives under ``LAUNCH_DIR / ".andrewcli"`` — the
@@ -45,6 +47,8 @@ CONFIG_DIR  = Path.home() / ".config" / "andrewcli"
 CONFIG_FILE = CONFIG_DIR / "config.yaml"
 DOMAINS_DIR = CONFIG_DIR / "domains"
 EVENTS_DIR  = CONFIG_DIR / "events"
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "andrewcli"
+RAG_CACHE_DIR = CACHE_DIR / "rag"
 
 # Resolved once, at first import. The ``ANDREW_LAUNCH_DIR`` override
 # exists so subprocesses (tray, event runners) inherit the original

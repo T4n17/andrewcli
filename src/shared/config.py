@@ -40,6 +40,26 @@ class Config:
         self.memory_enabled = bool(memory.get("enabled", True))
         self.memory_min_summary_chars = int(memory.get("min_summary_chars", 200))
 
+        rag = config.get("rag", {}) or {}
+        self.rag_enabled = bool(rag.get("enabled", True))
+        self.rag_top_sections = int(rag.get("top_sections", 5))
+        self.rag_top_chunks = int(rag.get("top_chunks", 4))
+        self.rag_max_context_chars = int(rag.get("max_context_chars", 8000))
+        self.rag_reranker_model = str(rag.get(
+            "reranker_model",
+            "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+        ))
+        self.rag_rerank_candidates = int(rag.get("rerank_candidates", 48))
+        self.rag_embedding_model = str(rag.get(
+            "embedding_model",
+            "intfloat/multilingual-e5-small",
+        ))
+        self.rag_dense_candidates = int(rag.get("dense_candidates", 48))
+        self.rag_cache_enabled = bool(rag.get("cache_enabled", True))
+        self.rag_ann_threshold = int(rag.get("ann_threshold", 50000))
+        self.rag_ann_shard_size = int(rag.get("ann_shard_size", 100000))
+        self.rag_watch = bool(rag.get("watch", True))
+
         # FastAPI bridge (src/core/server.py). When enabled, the CLI
         # and tray auto-start the HTTP server in a background thread so
         # external clients can submit prompts via /chat. The explicit

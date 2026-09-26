@@ -125,12 +125,10 @@ class TrayController:
         except Exception:
             pass
         self.stop()
-        bus = getattr(self.domain, "event_bus", None)
-        if bus is not None:
-            try:
-                bus.stop()
-            except Exception:
-                pass
+        try:
+            self.domain.close()
+        except Exception:
+            pass
 
     # -- public actions (panel signal slots) ----------------------------------
 
@@ -279,8 +277,10 @@ class TrayController:
             next_name = domains[0]
         try:
             self.stop()
-            self.domain.event_bus.stop()
+            old_domain = self.domain
+            old_domain.event_bus.stop()
             self.domain = self._create_domain(next_name)
+            old_domain.close()
             self._domain_name = next_name
             self._panel.set_domain_name(next_name)
             self._start_event_bus()

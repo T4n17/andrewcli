@@ -191,6 +191,7 @@ class AndrewCLI(AndrewCore):
         self.domain.rag.start()
         print("Andrew is running...")
         self._report_automations(*self.set_domain(self.domain))
+        asyncio.create_task(self.pump_notices())
         while True:
             prompt_str = f"[{self.domain_name}] Ask: "
             stdin_task = asyncio.create_task(self._read_input(prompt_str))

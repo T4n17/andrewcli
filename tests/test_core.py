@@ -110,6 +110,62 @@ class RunCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(second.busy_lock, first.busy_lock)
         self.assertIs(self.core.domain, second)
 
+    async def test_armed_automations_are_listed_apart_from_running_events(self):
+        (self.automations_dir / "hourly.yaml").write_text(
+            yaml.safe_dump({"trigger": {"every": "1h"}, "run": "hi"})
+        )
+        self.core.set_domain(self.core.domain)
+        self.core.run_command('/wait "hello"')
+
+        listing = self.core.handle_slash("/events")
+
+        self.assertIn("Running events: wait#2\n", listing)
+        self.assertRegex(listing, r"Armed automations: hourly \(next run \d\d:\d\d\) — see /automations")
+
+    async def test_only_automations_armed(self):
+        (self.automations_dir / "hourly.yaml").write_text(
+            yaml.safe_dump({"trigger": {"every": "1h"}, "run": "hi"})
+        )
+        self.core.set_domain(self.core.domain)
+
+        listing = self.core.handle_slash("/events")
+
+        self.assertIn("No events currently running.\nArmed automations: hourly", listing)
+
+
+class NotifyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pushed_message_is_shown_without_the_agent(self):
+        from fastapi.testclient import TestClient
+        from src.core.server import Server
+
+        bridge = Server()
+        response = TestClient(bridge.app).post(
+            "/notify", json={"source": "wud watcher", "message": "Drafts ready:\n- post 1"},
+        )
+        core = AndrewCore()
+        core.domain = _Domain("general")
+        outputs = []
+        core._on_event_output = lambda iid, desc, text: outputs.append((iid, desc, text))
+        with mock.patch("src.core.andrew.server", bridge):
+            pump = asyncio.create_task(core.pump_notices())
+            for _ in range(50):
+                await asyncio.sleep(0.05)
+                if outputs:
+                    break
+            pump.cancel()
+        core.bus.stop()
+
+        self.assertEqual(response.status_code, 202)
+        (instance_id, description, text) = outputs[0]
+        self.assertTrue(instance_id.startswith("wud-watcher#"))
+        self.assertEqual(description, "Message from wud watcher")
+        self.assertEqual(text, "Drafts ready:\n- post 1")
+
+    def test_echo_builtin(self):
+        core = AndrewCore()
+        self.assertEqual(core.handle_slash("/echo  hello there "), "hello there")
+        self.assertIsNone(core.handle_slash("/echoes"))
+
 
 if __name__ == "__main__":
     unittest.main()

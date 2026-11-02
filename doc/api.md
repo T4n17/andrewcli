@@ -14,6 +14,7 @@ The server is a **middleware**: it does not call the LLM directly. Instead it en
 | `GET` | `/chat/{session_id}` | Poll for new tokens — consumed per call; `done: true` when the full response is ready |
 | `DELETE` | `/chat/{session_id}` | Discard a session and its buffered tokens |
 | `GET` | `/events` | List available slash-command event types and their parameters |
+| `POST` | `/notify` | Show `{"message": "...", "source": "..."}` in the CLI/tray as an event from `source`, without calling the agent (202) |
 
 ---
 
@@ -22,6 +23,20 @@ The server is a **middleware**: it does not call the LLM directly. Instead it en
 `POST /chat` returns immediately with a `session_id`. The CLI/tray picks up the message within 100 ms and processes it through the normal submit path. Tokens accumulate in a per-session store as they are generated. Each `GET /chat/{session_id}` call consumes and returns any buffered tokens; poll until `done: true`.
 
 **Events** — when a slash command starts an event that sends a message to the agent (e.g. `/schedule`, `/timer`, `/project`), the session stays open (`done: false`) until the event fires and the agent's response is fully streamed. The client polls the same `session_id` throughout. Events without an agent message (side-effect-only triggers) close the session immediately after the confirmation token.
+
+---
+
+## Pushing messages from other programs
+
+`POST /notify` lets a script or background service print into a running AndrewCLI as it happens. The message is shown like an event response (`◆ Event [source#N]` banner in the CLI, streamed into the tray/Artemis panel) and recorded in `/status`. The agent is not involved, so the text appears exactly as sent. `source` (default `external`) names the event; characters other than letters, digits, `_`, `-`, and `.` become `-`.
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/notify \
+  -H "Content-Type: application/json" \
+  -d '{"source": "backup", "message": "Nightly backup finished: 12 GB"}'
+```
+
+The server must be running: set `server.enabled: true` for the CLI and tray (Artemis always starts it). Requests fail fast when it is not, so callers can ignore errors.
 
 ---
 

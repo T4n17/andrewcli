@@ -33,7 +33,7 @@ run: "Give me today's date and the three most important items in todo.md."
 | `run` | Effect |
 |-------|--------|
 | `"Summarize my inbox"` | Prompt answered by an isolated, memory-free generation (the same path events use). The conversation memory is never touched. |
-| `/reset`, `/rag reindex`, `/stop loop` | Built-in command. |
+| `/reset`, `/rag reindex`, `/stop loop`, `/echo Stand up!` | Built-in command (`/echo` prints its text as-is, e.g. for reminders). |
 | `/summarize notes.md` | Workflow of the active domain; its streamed output is the automation's response. |
 | `/loop "Poll /health until 200" 20` | Starts an event on the bus; the event then runs on its own. |
 

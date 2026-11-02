@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import AsyncIterator
 
 from src.core.automation import AutomationEvent
-from src.core.event import EventBus
+from src.core.event import Event, EventBus
 from src.core.llm import ToolEvent, ToolResultEvent
 from src.core.registry import registry
 from src.core.server import server
@@ -48,6 +49,28 @@ def _dispatches(event) -> bool:
         if getattr(event, attr, ""):
             return True
     return False
+
+
+class NoticeEvent(Event):
+    """One-shot event that shows a message pushed by an external program.
+
+    The text is displayed through the ``/echo`` built-in, so it reaches
+    every surface like any event output, without calling the agent.
+    """
+
+    def __init__(self, source: str, message: str):
+        self.name = re.sub(r"[^A-Za-z0-9_.-]+", "-", source).strip("-") or "notice"
+        self.description = f"Message from {source}"
+        self.command = f"/echo {message}"
+        self._shown = False
+
+    async def condition(self):
+        if self._shown:
+            raise asyncio.CancelledError
+        self._shown = True
+
+    async def trigger(self):
+        pass
 
 
 class AndrewCore:
@@ -126,6 +149,14 @@ class AndrewCore:
         self.domain = domain
         self._disarm_automations()
         return self.arm_automations()
+
+    async def pump_notices(self) -> None:
+        """Show messages pushed through the HTTP ``/notify`` endpoint. Runs until cancelled."""
+        while True:
+            while not server.notices.empty():
+                source, message = server.notices.get_nowait()
+                self.bus.add(NoticeEvent(source, message))
+            await asyncio.sleep(0.2)
 
     def shutdown(self) -> None:
         self.bus.stop()
@@ -316,6 +347,14 @@ class AndrewCore:
             return "Usage: /automations | /automations reload | /automations run [name]"
         return self._format_automations()
 
+    @staticmethod
+    def _next_run_label(event: AutomationEvent) -> str:
+        now = datetime.now()
+        if event.next_run is None or event.next_run <= now:
+            return "running"
+        fmt = "%H:%M" if event.next_run.date() == now.date() else "%Y-%m-%d %H:%M"
+        return f"next run {event.next_run:{fmt}}"
+
     def _format_automations(self) -> str:
         automations, errors = registry.automations()
         if not automations and not errors:
@@ -324,7 +363,6 @@ class AndrewCore:
             event.name: event for event in self.bus.events().values()
             if isinstance(event, AutomationEvent)
         }
-        now = datetime.now()
         lines = ["Automations:\n"]
         for automation in sorted(automations, key=lambda a: a.name):
             event = armed.get(automation.name)
@@ -334,10 +372,8 @@ class AndrewCore:
                 state = f"inactive in this domain (domain: {', '.join(automation.domains)})"
             elif event is None:
                 state = "done" if automation.name in self._automations_seen else "not armed"
-            elif event.next_run is None or event.next_run <= now:
-                state = "running"
             else:
-                state = f"next run {event.next_run:%Y-%m-%d %H:%M}"
+                state = self._next_run_label(event)
             lines.append(
                 f"- {automation.name} [{state}] — {automation.describe_trigger()} → {automation.run}\n"
             )
@@ -365,8 +401,17 @@ class AndrewCore:
         if cmd == "/help":
             return registry.list_builtins()
 
+        if cmd == "/echo" or cmd.startswith(("/echo ", "/echo\n")):
+            return cmd[len("/echo"):].strip()
+
         if cmd == "/events":
-            return registry.list_events(bus.running())
+            running, armed = [], []
+            for instance_id, event in bus.events().items():
+                if isinstance(event, AutomationEvent):
+                    armed.append(f"{event.name} ({self._next_run_label(event)})")
+                else:
+                    running.append(instance_id)
+            return registry.list_events(running, armed)
 
         if cmd == "/workflows":
             self.domain.load_workflows()

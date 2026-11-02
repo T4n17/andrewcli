@@ -7,6 +7,8 @@ The :class:`Server` class wraps three concerns into one object:
   up;
 * a **per-session response store** that accumulates the streamed tokens
   produced by the agent so the HTTP client can poll for them;
+* a **notice queue** where ``/notify`` puts messages pushed by external
+  programs, shown by the CLI/tray without involving the agent;
 * the **FastAPI app** itself, with the ``/chat``, ``/chat/{sid}``,
   ``/events`` routes wired to the methods above.
 
@@ -46,6 +48,11 @@ class ChatRequest(BaseModel):
     message: str
 
 
+class NotifyRequest(BaseModel):
+    message: str
+    source: str = "external"
+
+
 class Server:
     """FastAPI app + cross-thread bridge between HTTP clients and the agent.
 
@@ -60,6 +67,10 @@ class Server:
         # (session_id, message) pairs enqueued by the server, consumed
         # by the CLI/tray main loop.
         self.inbox: queue.SimpleQueue[tuple[str, str]] = queue.SimpleQueue()
+
+        # (source, message) pairs from /notify, shown as-is by
+        # AndrewCore.pump_notices().
+        self.notices: queue.SimpleQueue[tuple[str, str]] = queue.SimpleQueue()
 
         # Per-session response accumulator. Keyed by session id; values
         # are :class:`_Session` records that grow as the agent streams.
@@ -141,6 +152,12 @@ class Server:
             """Queue *message* for the CLI/tray and return a session_id for polling."""
             sid = self.new_session(req.message)
             return {"session_id": sid, "status": "queued"}
+
+        @app.post("/notify", status_code=202)
+        async def notify(req: NotifyRequest):
+            """Show *message* in the CLI/tray as an event from *source* (no LLM call)."""
+            self.notices.put((req.source, req.message))
+            return {"status": "queued"}
 
         @app.get("/chat/{session_id}")
         async def poll_endpoint(session_id: str):

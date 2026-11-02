@@ -138,6 +138,7 @@ Andrew: Current price is $102.4/bbl — above threshold, continuing.
 | `/rag status` | Show knowledge-base indexing state, backend, and document counts |
 | `/rag metrics` | Show p50/p95 retrieval latency and per-stage timings |
 | `/rag reindex` | Rebuild the active domain's knowledge index |
+| `/echo [text]` | Print text as-is — handy as an automation `run` |
 | `/clear` | Clear the screen — text only, memory is kept |
 | `/reset` | Clear conversation memory — text is kept |
 
@@ -168,5 +169,5 @@ Andrew: Current price is $102.4/bbl — above threshold, continuing.
 | Rolling memory and context-aware router | [doc/memory.md](doc/memory.md) |
 | Events, slash commands, ProjectEvent, LoopEvent, MonitorEvent | [doc/events.md](doc/events.md) |
 | Automations: scheduled prompts, workflows, and events | [doc/automations.md](doc/automations.md) |
-| HTTP API endpoints and curl examples | [doc/api.md](doc/api.md) |
+| HTTP API endpoints, pushing messages with `/notify`, curl examples | [doc/api.md](doc/api.md) |
 | Adding tools, skills, domains, events, and workflows | [doc/extending.md](doc/extending.md) |

@@ -118,6 +118,7 @@ class TrayController:
 
         self._event_poll_timer.start()
         self._activate_domain()
+        self._notices = asyncio.run_coroutine_threadsafe(self._core.pump_notices(), self._loop)
 
     def shutdown(self) -> None:
         """Stop everything the controller owns. Idempotent."""
@@ -126,6 +127,9 @@ class TrayController:
         except Exception:
             pass
         self.stop()
+        notices = getattr(self, "_notices", None)
+        if notices is not None:
+            notices.cancel()
         try:
             self._on_loop(self._core.shutdown)
         except Exception:

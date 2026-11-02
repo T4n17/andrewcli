@@ -260,16 +260,22 @@ class Registry:
             "- /stop [name|id]              — stop a running event by name or instance id\n"
             "- /status                      — list all events with status and iteration count\n"
             "- /status [id]                 — show full output log for a specific event\n"
+            "- /echo [text]                 — print text as-is (useful in automations)\n"
             "- /clear                       — clear the screen (text only, memory kept)\n"
             "- /reset                       — clear conversation memory (text kept)\n"
         )
 
-    def list_events(self, running: list[str] | None = None) -> str:
+    def list_events(
+        self,
+        running: list[str] | None = None,
+        automations: list[str] | None = None,
+    ) -> str:
         """Return available events and which are currently running (for ``/events``).
 
-        If *running* is provided (from :py:meth:`EventBus.running`),
+        If *running* is provided (instance IDs of user-started events),
         active events are shown with a marker so the user knows what
-        can be stopped.
+        can be stopped. *automations* (e.g. ``"backup (next run 23:00)"``)
+        lists armed automations on their own line.
         """
         ev = self.events()
         lines: list[str] = []
@@ -280,6 +286,8 @@ class Registry:
                 lines.append("  /stop [name|id]  — stop a running event")
             else:
                 lines.append("No events currently running.")
+            if automations:
+                lines.append("Armed automations: " + ", ".join(automations) + " — see /automations")
             lines.append("")
 
         if not ev:

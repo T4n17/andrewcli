@@ -52,7 +52,7 @@ def format_tool_status(event) -> str | None:
 
 
 class LLM:
-    def __init__(self, api_base_url: str = None, model: str = None):
+    def __init__(self, api_base_url: str = None, model: str = None, memory: Memory | None = None):
         self.api_base_url = api_base_url or os.getenv("API_BASE_URL", "http://localhost:8080/v1")
         self.model = model or os.getenv("MODEL", "qwen3.5:9B")
         # Memory summarization is background work that doesn't need the
@@ -63,7 +63,7 @@ class LLM:
             base_url=self.api_base_url,
             api_key=os.getenv("OPENAI_API_KEY", "local"),
         )
-        self.memory = Memory()
+        self.memory = memory if memory is not None else Memory()
 
     def set_system_prompt(self, prompt: str):
         self.memory.add({"role": "system", "content": prompt})

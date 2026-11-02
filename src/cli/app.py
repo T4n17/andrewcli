@@ -55,6 +55,7 @@ class AndrewCLI(AndrewCore):
         self.domain = new_domain
         self.domain_name = next_name
         old_domain.close()
+        self._start_event_bus()
 
     async def _read_input(self, prompt):
         self._current_prompt = prompt
@@ -143,7 +144,7 @@ class AndrewCLI(AndrewCore):
         sys.stdout.flush()
 
     def _event_notify(self, event):
-        if not event.message:
+        if not event.message and not event.command:
             instance_id = getattr(event, "_instance_id", event.name)
             self._bg_print(f"\n\033[33m◆ Event [{instance_id}]: {event.description}\033[0m")
 
@@ -176,12 +177,21 @@ class AndrewCLI(AndrewCore):
     # Main loop
     # ------------------------------------------------------------------
 
+    def _start_event_bus(self) -> None:
+        """Wire the active domain's bus to this surface and arm automations."""
+        bus = self.domain.event_bus
+        bus.notify = self._event_notify
+        bus.dispatch = self._event_dispatch
+        armed, errors = self.arm_automations()
+        if armed:
+            self._bg_print(f"\033[90mAutomations armed: {', '.join(armed)}\033[0m")
+        for error in errors:
+            self._bg_print(f"\033[31mAutomation skipped: {error}\033[0m")
+
     async def run(self):
         self.domain.rag.start()
         print("Andrew is running...")
-        self.domain.event_bus.notify = self._event_notify
-        self.domain.event_bus.dispatch = self._event_dispatch
-        asyncio.create_task(self.domain.event_bus.start())
+        self._start_event_bus()
         while True:
             prompt_str = f"[{self.domain_name}] Ask: "
             stdin_task = asyncio.create_task(self._read_input(prompt_str))
@@ -251,14 +261,3 @@ class AndrewCLI(AndrewCore):
                 await self._stream_response_bridged(sid, user_input)
             else:
                 await self._stream_response(user_input)
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(AndrewCLI().run())
-    except KeyboardInterrupt:
-        print("\nAndrew stopped. Goodbye!")
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()

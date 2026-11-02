@@ -57,7 +57,7 @@ Create a new folder under `~/.config/andrewcli/domains/` (e.g. `~/.config/andrew
 ├── skills/                # optional — auto-discovered *.md
 ├── workflows/             # optional — auto-discovered *.py
 │   └── __init__.py
-└── knowledgebase/         # optional — documents retrieved for user turns
+└── knowledgebase/         # optional — documents searchable through the knowledge tools
 ```
 
 No Python subclass is required — the folder *is* the domain. Write `system_prompt.md`:
@@ -124,6 +124,20 @@ Invoke the workflow at runtime:
 ```
 
 The workflow is **auto-discovered** on the next user turn — no restart required. A built-in example (`/summarize [path]`) is included in the `general` domain.
+
+---
+
+## Add a new Automation
+
+Drop a YAML file into `~/.config/andrewcli/automations/`, e.g. `standup.yaml`:
+
+```yaml
+description: Weekday standup notes
+trigger: {at: "09:15", days: weekdays}
+run: "Read todo.md and list what is still open."
+```
+
+`run` takes a prompt or any slash command (built-in, workflow, or event). Type `/automations reload` to arm it without restarting. See [automations.md](automations.md) for every trigger and option.
 
 ---
 

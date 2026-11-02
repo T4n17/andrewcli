@@ -14,6 +14,9 @@ AndrewCLI separates **shipped code** (the Python package) from **runtime configu
 │   ├── project.py
 │   ├── loop.py
 │   └── schedule.py
+├── automations/                    # Scheduled prompts/commands (*.yaml) — see automations.md
+│   ├── daily_brief.yaml
+│   └── nightly_reset.yaml
 └── domains/                        # Each domain is a self-contained config folder
     └── general/                    # — auto-discovered, no manual registration
         ├── config.yaml             # Per-domain overrides (api_base_url, model, …)
@@ -35,13 +38,14 @@ AndrewCLI/                          # Installed package (this repository)
     │   ├── config.py               # Config class — loads ~/.config/andrewcli/config.yaml
     │   └── paths.py                # Centralized paths (PROJECT_ROOT, CONFIG_DIR, LAUNCH_DIR, DATA_DIR, …)
     ├── core/
-    │   ├── andrew.py               # AndrewCore — shared event log, dispatch, slash commands (CLI + tray)
+    │   ├── andrew.py               # AndrewCore — shared event log, dispatch, slash commands, automation arming (CLI + tray)
+    │   ├── automation.py           # Automation definitions, triggers/cron, AutomationEvent
     │   ├── server.py               # FastAPI middleware + shared bridge (inbox queue, session store)
     │   ├── domain.py               # Domain class (async generator, event bus, busy_lock)
     │   ├── event.py                # Event ABC + EventBus (add, remove, running, stop)
     │   ├── llm.py                  # Async LLM client with streaming + tool-calling loop
     │   ├── memory.py               # Rolling memory with background summarization
-    │   ├── registry.py             # Unified auto-discovery: domains, events (+ /slash parsing), tools, skills
+    │   ├── registry.py             # Unified auto-discovery: domains, events (+ /slash parsing), tools, skills, automations
     │   ├── router.py               # ToolRouter — LLM-based tool/skill router
     │   ├── skill.py                # Base Skill class (markdown-defined tools)
     │   └── tool.py                 # Base Tool class — auto-generates OpenAI schemas from type hints
@@ -80,7 +84,7 @@ A **Domain** is a folder under `~/.config/andrewcli/domains/<name>/` that groups
 - **System prompt** — loaded from `domains/<name>/system_prompt.md`. Plain markdown, no frontmatter.
 - **Tools** — auto-discovered from `domains/<name>/tools/*.py` (every concrete `Tool` subclass is instantiated and registered).
 - **Skills** — auto-discovered from `domains/<name>/skills/*.md`.
-- **Knowledge base** — documents under `domains/<name>/knowledgebase/` are parsed locally. Retrieval preserves heading paths and table column/value associations, fuses SQLite FTS5 BM25 with multilingual dense search, and applies a local multilingual cross-encoder before injecting the best excerpts only for the current user turn. Per-domain SQLite stores under `~/.cache/andrewcli/rag/` update changed documents transactionally. Dense search is exact below the configured threshold and uses persistent, memory-mapped USearch HNSW shards above it, keeping query memory and latency bounded for large collections. Every normal turn also receives internal, always-available knowledge tools for bounded iterative search, source/section filtering, neighboring-chunk lookup, and deterministic arithmetic. Their intermediate evidence is removed before conversation summarization.
+- **Knowledge base** — documents under `domains/<name>/knowledgebase/` are parsed locally. Extraction preserves heading paths and table column/value associations. Per-domain SQLite stores under `~/.cache/andrewcli/rag/` update changed documents transactionally. Dense search is exact below the configured threshold and uses persistent, memory-mapped USearch HNSW shards above it, keeping query memory and latency bounded for large collections. When the domain has indexed documents, every user turn receives internal knowledge tools for bounded iterative search (SQLite FTS5 BM25 fused with multilingual dense search, reranked by a local cross-encoder), source/section filtering, neighboring-chunk lookup, and deterministic arithmetic. The model decides whether to call them; their intermediate evidence is removed before conversation summarization.
 
 Domain configuration is **reloaded before every user turn** via `Domain.reload()`. Tool modules are re-imported with `importlib.reload`, skill files are re-scanned from disk, the system prompt and `config.yaml` are re-read. Flipping `routing_enabled` or pointing the domain at a new endpoint takes effect immediately — no restart required. If `api_base_url` or `model` changes, a new LLM client is created and the existing conversation memory is transplanted into it. Memory and the event bus are never touched by a reload.
 
@@ -129,7 +133,7 @@ When the LLM invokes a skill, its body is **promoted into the system prompt** as
 
 ## AndrewCore
 
-`AndrewCore` (`core/andrew.py`) is the shared logic layer used by both the CLI and the tray. It holds the event output log (`_event_log`, `_event_tool_log`) and live-generation buffers (`_event_live`, `_event_live_tools`), implements `_event_dispatch` (token collection, tool tracking, log update), and exposes `handle_slash` for `/events`, `/stop`, `/status`, `/clear`, and `/reset`.
+`AndrewCore` (`core/andrew.py`) is the shared logic layer used by both the CLI and the tray. It holds the event output log (`_event_log`, `_event_tool_log`) and live-generation buffers (`_event_live`, `_event_live_tools`), implements `_event_dispatch` (token collection, tool tracking, log update), and exposes `handle_slash` for `/events`, `/workflows`, `/skills`, `/automations`, `/rag`, `/stop`, `/status`, `/clear`, and `/reset`. It also arms [automations](automations.md) whenever a surface wires a domain's event bus.
 
 Surfaces override three hooks:
 

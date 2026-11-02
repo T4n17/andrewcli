@@ -1,0 +1,12 @@
+# Clears the conversation memory every night. Text starting with "/" runs
+# a slash command: a built-in (/reset, /rag reindex, ...), a workflow of the
+# active domain, or an event (/loop "...", /monitor "...", ...).
+
+description: Start each day with a clean conversation memory
+enabled: false
+silent: true              # record the run in /status without printing it
+
+trigger:
+  cron: "0 3 * * *"       # minute hour day-of-month month day-of-week
+
+run: /reset

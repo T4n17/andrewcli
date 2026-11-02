@@ -90,6 +90,7 @@ class TrayController:
         self._core.domain = self.domain
         self._core._on_event_token = lambda _iid, tok: self._event_token_queue.put(tok)
         self._core._on_event_done = lambda _iid: self._event_token_queue.put(None)
+        self._core._on_loop = self._on_loop
 
         self._event_poll_timer = QTimer(self._parent)
         self._event_poll_timer.setInterval(100)
@@ -303,7 +304,32 @@ class TrayController:
         bus = self.domain.event_bus
         bus.notify = self._event_notify
         bus.dispatch = self._core._event_dispatch
-        asyncio.run_coroutine_threadsafe(bus.start(), self._loop)
+        try:
+            armed, errors = self._on_loop(self._core.arm_automations)
+        except Exception:
+            log.exception("failed to arm automations")
+            return
+        if armed:
+            log.info("automations armed: %s", ", ".join(armed))
+        for error in errors:
+            log.warning("automation skipped: %s", error)
+
+    def _on_loop(self, fn):
+        """Run *fn* on the background asyncio loop and return its result.
+
+        Event bus mutations call ``asyncio.create_task`` / ``Task.cancel``,
+        which are only safe on the loop's own thread.
+        """
+        try:
+            if asyncio.get_running_loop() is self._loop:
+                return fn()
+        except RuntimeError:
+            pass
+
+        async def _call():
+            return fn()
+
+        return asyncio.run_coroutine_threadsafe(_call(), self._loop).result(timeout=10)
 
     # -- event bus callbacks (called from asyncio thread) ---------------------
 
@@ -322,7 +348,7 @@ class TrayController:
                 self._on_event_notification(event)
             except Exception:
                 log.exception("on_event_notification callback raised")
-            if event.message:
+            if event.message or event.command:
                 self._panel.start_event_response(event.name)
 
         while not self._event_token_queue.empty():

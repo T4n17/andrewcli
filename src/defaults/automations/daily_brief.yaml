@@ -1,0 +1,16 @@
+# Automations run a prompt or a slash command on a schedule.
+# Every *.yaml file in this folder is one automation; see doc/automations.md.
+# Edit a file, then type /automations reload to apply the change.
+
+description: Weekday morning briefing
+enabled: false            # set to true to arm it
+
+# Optional: only arm while one of these domains is active (default: every domain).
+# domain: general
+
+trigger:
+  at: "08:30"             # quote times so YAML keeps them as text
+  days: weekdays          # mon..sun, weekdays, weekends, or a list
+
+# Plain text is sent as a prompt to an isolated, memory-free generation.
+run: "Give me today's date and a short motivational sentence to start the day."

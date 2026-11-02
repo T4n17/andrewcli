@@ -14,153 +14,148 @@ from src.core.rag import (
     KnowledgeBase,
     _Chunk,
     _Document,
-    _query_texts,
     _table_heading,
     _table_rows,
 )
 
 
+def _knowledge(root: Path, cache_path: Path, **kwargs) -> KnowledgeBase:
+    kwargs.setdefault("watch", False)
+    return KnowledgeBase(root, cache_path=cache_path, **kwargs)
+
+
 class KnowledgeBaseTests(unittest.IsolatedAsyncioTestCase):
-    async def test_retrieves_relevant_chunks_with_citations(self):
+    async def test_search_returns_relevant_chunks_with_citations(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory) / "knowledgebase"
+            root.mkdir()
             (root / "rockets.txt").write_text(
                 "The orbital launch sequence starts with propellant loading."
             )
             (root / "gardening.txt").write_text(
                 "Tomatoes need regular watering and direct sunlight."
             )
-            knowledge = KnowledgeBase(root, watch=False)
+            knowledge = _knowledge(root, Path(directory) / "index.sqlite3")
             knowledge.start()
             await knowledge._refresh_task
 
-            context = await knowledge.retrieve("How does the orbital launch sequence start?")
+            result = knowledge.search_evidence("How does the orbital launch sequence start?")
+            unrelated = knowledge.search_evidence("bake sourdough")
             knowledge.stop()
 
-        self.assertIn("[source: rockets.txt — rockets]", context)
-        self.assertIn("propellant loading", context)
-        self.assertNotIn("Tomatoes", context)
+        self.assertIn("[source: rockets.txt — rockets]", result)
+        self.assertIn("propellant loading", result)
+        self.assertNotIn("Tomatoes", result)
+        self.assertEqual(unrelated, "No matching knowledge-base evidence was found.")
 
-    async def test_page_window_links_an_entity_to_a_later_fact(self):
-        document = _Document(
-            "manual.pdf",
-            (
-                _Chunk("manual.pdf", "Overview", 1, "Orion systems division"),
-                _Chunk("manual.pdf", "Overview", 2, "Application requirements"),
-                _Chunk("manual.pdf", "Overview", 3, "Evaluation criteria"),
-                _Chunk("manual.pdf", "Overview", 4, "Results are published at https://example.test/orion"),
-                _Chunk("manual.pdf", "Overview", 10, "Other results are published elsewhere"),
-            ),
-        )
-        class Reranker:
-            def __init__(self):
-                self.called = False
-
-            def predict(self, pairs, **kwargs):
-                self.called = True
-                return [10.0 if "example.test/orion" in passage else 0.0 for _, passage in pairs]
-
-        with tempfile.TemporaryDirectory() as directory:
-            reranker = Reranker()
-            knowledge = KnowledgeBase(Path(directory), watch=False, reranker_model="test")
-            knowledge._reranker = reranker
-            context = knowledge._format_context(
-                "Where are the Orion systems results published? Do not use external search.",
-                knowledge._build_snapshot([document]),
-            )
-
-        self.assertTrue(reranker.called)
-        self.assertIn("https://example.test/orion", context)
-        self.assertLessEqual(context.count("[source:"), 4)
-
-    def test_dense_retrieval_recovers_lexically_unmatched_chunk(self):
-        documents = [
-            _Document("target.txt", (
-                _Chunk("target.txt", "Guide", None, "vehicle service handbook"),
-            )),
-            _Document("other.txt", (
-                _Chunk("other.txt", "Guide", None, "kitchen recipe collection"),
-            )),
-        ]
-        vectors = {
-            "target.txt": np.array([[1.0, 0.0]], dtype=np.float32),
-            "other.txt": np.array([[0.0, 1.0]], dtype=np.float32),
-        }
-
+    def test_dense_search_recovers_lexically_unmatched_chunk(self):
         class Embedder:
             def encode(self, texts, **kwargs):
-                return np.array([[1.0, 0.0] for _ in texts], dtype=np.float32)
-
-        with tempfile.TemporaryDirectory() as directory:
-            knowledge = KnowledgeBase(
-                Path(directory),
-                watch=False,
-                top_chunks=1,
-                embedding_model="test",
-            )
-            knowledge._embedder = Embedder()
-            context = knowledge._format_context(
-                "automobile maintenance",
-                knowledge._build_snapshot(documents, vectors),
-            )
-
-        self.assertIn("vehicle service handbook", context)
-        self.assertNotIn("kitchen recipe collection", context)
-
-    def test_follow_up_search_uses_original_and_contextual_queries(self):
-        self.assertEqual(
-            _query_texts(
-                "And the net profit in the same third year?",
-                "What is third-year EBITDA for the AulaLayer project?",
-            ),
-            (
-                "And the net profit in the same third year",
-                "What is third-year EBITDA for the AulaLayer project\n"
-                "And the net profit in the same third year",
-            ),
-        )
-
-    def test_contextual_query_disambiguates_follow_up(self):
-        class Reranker:
-            def predict(self, pairs, **kwargs):
-                return [
-                    10.0 if "AulaLayer" in passage else 0.0
-                    for _, passage in pairs
-                ]
+                return np.asarray([
+                    [1.0, 0.0] if "automobile" in text or "vehicle" in text else [0.0, 1.0]
+                    for text in texts
+                ], dtype=np.float32)
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "knowledgebase"
             root.mkdir()
-            knowledge = KnowledgeBase(
-                root,
-                cache_path=Path(directory) / "index.sqlite3",
-                watch=False,
-                top_chunks=1,
-                reranker_model="test",
+            (root / "vehicles.txt").write_text("vehicle service handbook")
+            (root / "cooking.txt").write_text("bread baking recipe")
+            knowledge = _knowledge(
+                root, Path(directory) / "cache" / "index.sqlite3", embedding_model="test",
             )
-            knowledge._store.sync_document(
-                "beacon.txt",
-                (1, 1),
-                [("Forecast", None, "Year 3 net profit: EUR 999", "Project: Beacon")],
-                None,
-            )
-            knowledge._store.sync_document(
-                "aulalayer.txt",
-                (1, 1),
-                [("Forecast", None, "Year 3 net profit: EUR 780", "Project: AulaLayer")],
-                None,
-            )
-            knowledge._reranker = Reranker()
-
-            context = knowledge._format_store_context(
-                "And the net profit in the same third year?",
-                "What is third-year EBITDA for the AulaLayer project?",
-            )
+            knowledge._embedder = Embedder()
+            knowledge._refresh_sync()
+            result = knowledge.search_evidence("automobile upkeep", mode="semantic", limit=1)
+            metrics = knowledge.metrics()
             knowledge.stop()
 
-        self.assertIn("EUR 780", context)
-        self.assertNotIn("EUR 999", context)
-        self.assertIn("do not derive or calculate", context)
+        self.assertIn("vehicle service handbook", result)
+        self.assertNotIn("bread", result)
+        self.assertIn("Agentic RAG calls: 1", metrics)
+
+    async def test_tools_are_hidden_until_initial_index_finishes(self):
+        gate = threading.Event()
+
+        def slow_extractor(path, root):
+            gate.wait(timeout=2)
+            return _Document(
+                str(path.relative_to(root)),
+                (_Chunk(path.name, path.stem, None, path.read_text()),),
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "knowledgebase"
+            root.mkdir()
+            (root / "manual.txt").write_text("Emergency shutdown procedure.")
+            knowledge = _knowledge(
+                root, Path(directory) / "index.sqlite3", extractor=slow_extractor,
+            )
+            knowledge.start()
+            await asyncio.sleep(0.01)
+
+            during_index = knowledge.agent_tools()
+            gate.set()
+            await knowledge._refresh_task
+            after_index = knowledge.agent_tools()
+            knowledge.stop()
+
+        self.assertEqual(during_index, [])
+        self.assertIn("search_knowledge", {tool.name for tool in after_index})
+
+    async def test_reindex_replaces_changed_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "knowledgebase"
+            root.mkdir()
+            document = root / "manual.txt"
+            document.write_text("The access code is amber.")
+            knowledge = _knowledge(root, Path(directory) / "index.sqlite3")
+            knowledge.start()
+            await knowledge._refresh_task
+            self.assertIn("amber", knowledge.search_evidence("access code"))
+
+            document.write_text("The access code is cobalt now.")
+            self.assertTrue(knowledge.request_refresh())
+            await asyncio.sleep(0.5)
+            await knowledge._refresh_task
+            result = knowledge.search_evidence("access code")
+            knowledge.stop()
+
+        self.assertIn("cobalt", result)
+        self.assertNotIn("amber", result)
+
+    async def test_watcher_indexes_new_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "knowledgebase"
+            root.mkdir()
+            knowledge = _knowledge(root, Path(directory) / "index.sqlite3", watch=True)
+            knowledge.start()
+            await knowledge._refresh_task
+            (root / "new.txt").write_text("Newly indexed procedure.")
+
+            for _ in range(30):
+                await asyncio.sleep(0.1)
+                if knowledge._store.count_documents():
+                    break
+            result = knowledge.search_evidence("newly indexed")
+            knowledge.stop()
+
+        self.assertIn("[source: new.txt — new]", result)
+
+    async def test_markdown_headings_and_tables_are_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            document = root / "vehicle.md"
+            document.write_text(
+                "# Vehicle Guide\n\n## Launch Sequence\n\n"
+                "| Step | Action |\n|---|---|\n| 1 | Load propellant |\n"
+            )
+            knowledge = _knowledge(root, root / "index.sqlite3")
+            indexed = await asyncio.to_thread(knowledge._extract_document, document, root)
+            knowledge.stop()
+
+        self.assertTrue(any("Launch Sequence" in chunk.section for chunk in indexed.chunks))
+        self.assertTrue(any("Load propellant" in chunk.text for chunk in indexed.chunks))
 
     def test_agent_tools_search_filter_neighbors_and_share_budget(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -211,6 +206,29 @@ class KnowledgeBaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Agentic RAG calls: 3", metrics)
         self.assertEqual(search.execution_delay, 0.0)
         self.assertTrue(search.turn_scoped)
+
+    def test_agent_tools_hidden_for_empty_knowledge_base(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "knowledgebase"
+            root.mkdir()
+            knowledge = KnowledgeBase(
+                root,
+                cache_path=Path(directory) / "index.sqlite3",
+                watch=False,
+            )
+            knowledge._ready = True
+            empty_tools = knowledge.agent_tools()
+            knowledge._store.sync_document(
+                "alpha.txt",
+                (1, 1),
+                [("Forecast", 1, "Net profit: EUR 780", "Project Alpha")],
+                None,
+            )
+            tools = knowledge.agent_tools()
+            knowledge.stop()
+
+        self.assertEqual(empty_tools, [])
+        self.assertIn("search_knowledge", {tool.name for tool in tools})
 
     def test_sqlite_cache_reuses_chunks_and_embeddings(self):
         class Embedder:
@@ -264,39 +282,6 @@ class KnowledgeBaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(document_count, 1)
         self.assertEqual(chunk_count, 1)
         self.assertEqual(len(dense_hits), 1)
-
-    def test_persistent_hybrid_query_records_metrics(self):
-        class Embedder:
-            def encode(self, texts, **kwargs):
-                vectors = []
-                for text in texts:
-                    vectors.append(
-                        [1.0, 0.0]
-                        if "automobile" in text or "vehicle" in text
-                        else [0.0, 1.0]
-                    )
-                return np.asarray(vectors, dtype=np.float32)
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "knowledgebase"
-            root.mkdir()
-            (root / "vehicles.txt").write_text("vehicle service handbook")
-            (root / "cooking.txt").write_text("bread baking recipe")
-            knowledge = KnowledgeBase(
-                root,
-                watch=False,
-                cache_path=Path(directory) / "cache" / "index.sqlite3",
-                embedding_model="test",
-                top_chunks=1,
-            )
-            knowledge._embedder = Embedder()
-            knowledge._refresh_sync()
-            context = knowledge._format_store_context("automobile upkeep")
-            metrics = knowledge.metrics()
-
-        self.assertIn("vehicle service handbook", context)
-        self.assertIn("Queries sampled: 1", metrics)
-        self.assertIn("dense_ms", metrics)
 
     def test_embedding_model_change_reuses_chunks_and_reembeds(self):
         class Embedder:
@@ -391,113 +376,6 @@ class KnowledgeBaseTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(calls, ["First version.", "Second version with a different size."])
 
-    async def test_unrelated_query_returns_no_context(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "rockets.txt").write_text("Orbital launch sequence and propellant loading.")
-            knowledge = KnowledgeBase(root, watch=False)
-            knowledge.start()
-            await knowledge._refresh_task
-
-            context = await knowledge.retrieve("How do I bake sourdough?")
-            knowledge.stop()
-
-        self.assertEqual(context, "")
-
-    async def test_query_does_not_wait_for_initial_index(self):
-        gate = threading.Event()
-
-        def slow_extractor(path, root):
-            gate.wait(timeout=2)
-            return _Document(
-                str(path.relative_to(root)),
-                (_Chunk(path.name, path.stem, None, path.read_text()),),
-            )
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "manual.txt").write_text("Emergency shutdown procedure.")
-            knowledge = KnowledgeBase(root, watch=False, extractor=slow_extractor)
-            knowledge.start()
-            await asyncio.sleep(0.01)
-
-            context = await knowledge.retrieve("shutdown")
-            gate.set()
-            await knowledge._refresh_task
-            knowledge.stop()
-
-        self.assertEqual(context, "")
-
-    async def test_reindex_replaces_changed_content(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            document = root / "manual.txt"
-            document.write_text("The access code is amber.")
-            knowledge = KnowledgeBase(root, watch=False)
-            knowledge.start()
-            await knowledge._refresh_task
-            self.assertIn("amber", await knowledge.retrieve("access code"))
-
-            document.write_text("The access code is cobalt.")
-            self.assertEqual(await knowledge.retrieve("access code"), "")
-            await asyncio.sleep(0.5)
-            await knowledge._refresh_task
-            context = await knowledge.retrieve("access code")
-            knowledge.stop()
-
-        self.assertIn("cobalt", context)
-        self.assertNotIn("amber", context)
-
-    async def test_watcher_indexes_new_files(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            knowledge = KnowledgeBase(root, watch=True)
-            knowledge.start()
-            await knowledge._refresh_task
-            (root / "new.txt").write_text("Newly indexed procedure.")
-
-            for _ in range(30):
-                await asyncio.sleep(0.1)
-                with knowledge._lock:
-                    if knowledge._snapshot.documents:
-                        break
-            with knowledge._lock:
-                sources = [doc.source for doc in knowledge._snapshot.documents]
-            knowledge.stop()
-
-        self.assertEqual(sources, ["new.txt"])
-
-    def test_context_metadata_disambiguates_similar_chunks(self):
-        documents = [
-            _Document("orion.txt", (
-                _Chunk(
-                    "orion.txt",
-                    "Schedule",
-                    None,
-                    "The deadline is target-value.",
-                    "Document: Orion handbook\nSection: Schedule",
-                ),
-            )),
-            _Document("nova.txt", (
-                _Chunk(
-                    "nova.txt",
-                    "Schedule",
-                    None,
-                    "The deadline is distractor-value.",
-                    "Document: Nova handbook\nSection: Schedule",
-                ),
-            )),
-        ]
-        with tempfile.TemporaryDirectory() as directory:
-            knowledge = KnowledgeBase(Path(directory), watch=False, top_chunks=1)
-            context = knowledge._format_context(
-                "What is the Orion deadline?",
-                knowledge._build_snapshot(documents),
-            )
-
-        self.assertIn("target-value", context)
-        self.assertNotIn("distractor-value", context)
-
     def test_table_rows_preserve_key_value_relationships(self):
         rows = _table_rows(
             "| Field | Year 2 | Year 3 |\n"
@@ -518,25 +396,6 @@ class KnowledgeBaseTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(_table_heading(markdown), "Quarterly Performance Report")
 
-    async def test_markdown_headings_and_tables_are_preserved(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            document = root / "vehicle.md"
-            document.write_text(
-                "# Vehicle Guide\n\n## Launch Sequence\n\n"
-                "| Step | Action |\n|---|---|\n| 1 | Load propellant |\n"
-            )
-            knowledge = KnowledgeBase(root, watch=False)
-            indexed = await asyncio.to_thread(knowledge._extract_document, document, root)
-            context = knowledge._format_context(
-                "launch sequence",
-                knowledge._build_snapshot([indexed]),
-            )
-
-        self.assertTrue(any("Launch Sequence" in chunk.section for chunk in indexed.chunks))
-        self.assertTrue(any("Load propellant" in chunk.text for chunk in indexed.chunks))
-        self.assertIn("Load propellant", context)
-
     async def test_pptx_slides_are_discovered_and_extracted(self):
         from pptx import Presentation
         from pptx.util import Inches
@@ -556,7 +415,7 @@ class KnowledgeBaseTests(unittest.IsolatedAsyncioTestCase):
             table.cell(1, 0).text = "Revenue"
             table.cell(1, 1).text = "1,250,000"
             presentation.save(document)
-            knowledge = KnowledgeBase(root, watch=False)
+            knowledge = _knowledge(root, Path(directory) / "index.sqlite3")
             discovered = document in knowledge._files()
             indexed = await asyncio.to_thread(knowledge._extract_document, document, root)
 
@@ -566,6 +425,7 @@ class KnowledgeBaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("780,000" in chunk.text for chunk in indexed.chunks))
         self.assertTrue(any("Revenue" in chunk.text for chunk in indexed.chunks))
         self.assertTrue(any("Year 3: 1,250,000" in chunk.text for chunk in indexed.chunks))
+
 
 
 class RAGCommandTests(unittest.TestCase):

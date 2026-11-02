@@ -1,4 +1,4 @@
-"""Unified registry — auto-discovery of domains, events, tools, skills, and workflows.
+"""Unified registry — auto-discovery of domains, events, tools, skills, workflows, and automations.
 
 All pluggable abstractions follow the same convention: drop a file in the
 right directory and it is picked up at import time, no manual registration
@@ -26,6 +26,9 @@ Python packages.
   package contributes its concrete :class:`~src.core.workflow.Workflow`
   subclasses. Workflows are invoked directly via ``/name [args]`` and run
   outside the LLM agent loop.
+* **Automations** — every ``automations/*.yaml`` file describes a
+  scheduled run of a prompt or slash command (see
+  :mod:`src.core.automation`).
 
 Most consumers just use the module-level :data:`registry` singleton::
 
@@ -41,14 +44,16 @@ import importlib
 import inspect
 import logging
 import shlex
+import sys
 from pathlib import Path
 from typing import get_type_hints
 
+from src.core.automation import Automation, load_automations
 from src.core.event import Event
 from src.core.skill import Skill
 from src.core.tool import Tool
 from src.core.workflow import Workflow
-from src.shared.paths import DOMAINS_DIR, EVENTS_DIR
+from src.shared.paths import AUTOMATIONS_DIR, DOMAINS_DIR, EVENTS_DIR
 
 log = logging.getLogger(__name__)
 
@@ -67,9 +72,32 @@ class Registry:
         self,
         domains_dir: Path | str = DOMAINS_DIR,
         events_dir:  Path | str = EVENTS_DIR,
+        automations_dir: Path | str = AUTOMATIONS_DIR,
     ):
         self.domains_dir = Path(domains_dir)
         self.events_dir  = Path(events_dir)
+        self.automations_dir = Path(automations_dir)
+        # Source mtime of every module imported through _import, so edits
+        # are picked up on the next discovery without a restart.
+        self._mtimes: dict[str, int] = {}
+
+    def _import(self, module_name: str):
+        """Import *module_name*, re-executing it if its file changed since the last import."""
+        module = sys.modules.get(module_name)
+        if module is None:
+            module = importlib.import_module(module_name)
+        else:
+            try:
+                mtime = Path(module.__file__).stat().st_mtime_ns
+            except (AttributeError, TypeError, OSError):
+                return module
+            if self._mtimes.get(module_name, mtime) != mtime:
+                module = importlib.reload(module)
+        try:
+            self._mtimes[module_name] = Path(module.__file__).stat().st_mtime_ns
+        except (AttributeError, TypeError, OSError):
+            pass
+        return module
 
     # ------------------------------------------------------------------
     # Domains
@@ -129,8 +157,9 @@ class Registry:
             if path.stem == "__init__":
                 continue
             try:
-                module = importlib.import_module(f"events.{path.stem}")
+                module = self._import(f"events.{path.stem}")
             except Exception:
+                log.exception("failed to import event module %s", path)
                 continue
             for _, obj in inspect.getmembers(module, inspect.isclass):
                 if (
@@ -209,6 +238,10 @@ class Registry:
             "- /help                        — show this help\n"
             "- /events                      — list available events and which are running\n"
             "- /workflows                   — list workflows available in this domain\n"
+            "- /skills                      — list skills of the active domain\n"
+            "- /automations                 — list automations and their next run\n"
+            "- /automations reload          — re-read automation files and re-arm them\n"
+            "- /automations run [name]      — run an automation now\n"
             "- /rag status                  — show knowledge base index status\n"
             "- /rag metrics                 — show retrieval and indexing latency\n"
             "- /rag reindex                 — rebuild the knowledge base index\n"
@@ -279,7 +312,7 @@ class Registry:
                 continue
             module_name = f"{package}.{path.stem}"
             try:
-                module = importlib.import_module(module_name)
+                module = self._import(module_name)
             except Exception:
                 log.exception("failed to import tool module %s", module_name)
                 continue
@@ -327,7 +360,7 @@ class Registry:
                 continue
             module_name = f"{package}.{path.stem}"
             try:
-                module = importlib.import_module(module_name)
+                module = self._import(module_name)
             except Exception:
                 log.exception("failed to import workflow module %s", module_name)
                 continue
@@ -430,6 +463,21 @@ class Registry:
     # Skills  (per-domain auto-discovery)
     # ------------------------------------------------------------------
 
+    def list_skills(self, domain: str) -> str:
+        """Return the skills of *domain* with their descriptions (for ``/skills``).
+
+        Reads the skill files from disk, so the listing reflects edits
+        made since the domain's last reload.
+        """
+        skills = self.skills(self.domains_dir / domain / "skills")
+        if not skills:
+            return f"No skills in domain '{domain}' (add *.md files to its skills/ folder)."
+        lines = [f"Skills in domain '{domain}':\n"]
+        for skill in sorted(skills, key=lambda s: s.name):
+            tools = f" (tools: {', '.join(skill.required_tools)})" if skill.required_tools else ""
+            lines.append(f"- {skill.name} — {skill.description}{tools}\n")
+        return "\n".join(lines)
+
     def skills(self, skills_dir: Path | str) -> list[Skill]:
         """Instantiate a :class:`Skill` for every ``*.md`` file in *skills_dir*.
 
@@ -447,6 +495,17 @@ class Registry:
             except Exception:
                 log.exception("failed to load skill %s", path)
         return skills
+
+    # ------------------------------------------------------------------
+    # Automations  (global auto-discovery)
+    # ------------------------------------------------------------------
+
+    def automations(self) -> tuple[list[Automation], list[str]]:
+        """Return ``(automations, errors)`` loaded from ``automations/``."""
+        automations, errors = load_automations(self.automations_dir)
+        for error in errors:
+            log.warning("automation skipped: %s", error)
+        return automations, errors
 
 
 # Default singleton wired to the user's runtime config directories.

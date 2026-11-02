@@ -7,7 +7,9 @@ the three output hooks and set ``self.domain`` before the event bus fires.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 
+from src.core.automation import AutomationEvent
 from src.core.llm import ToolEvent, ToolResultEvent
 from src.core.registry import registry
 from src.core.server import server
@@ -34,6 +36,11 @@ class AndrewCore:
         Called when a visible dispatch ends (success, error, or cancellation).
         The tray uses this to put the ``None`` sentinel into its token queue so
         Qt knows the stream is over; the CLI ignores it.
+
+    ``_on_loop(fn)``
+        Runs *fn* on the asyncio loop that owns the event bus and returns
+        its result. The default calls it directly; the tray, whose slash
+        commands arrive on the Qt thread, replaces it.
     """
 
     def __init__(self) -> None:
@@ -41,6 +48,9 @@ class AndrewCore:
         self._event_tool_log: dict[str, list[list[dict]]] = {}
         self._event_live: dict[str, list[str]] = {}
         self._event_live_tools: dict[str, list[dict]] = {}
+        # Automations already armed once this session; their startup
+        # triggers do not fire again on domain switches or reloads.
+        self._automations_seen: set[str] = set()
 
     # ------------------------------------------------------------------
     # Hooks — override in subclasses / surfaces
@@ -54,6 +64,9 @@ class AndrewCore:
 
     def _on_event_done(self, instance_id: str) -> None:
         pass
+
+    def _on_loop(self, fn):
+        return fn()
 
     # ------------------------------------------------------------------
     # Event dispatch
@@ -71,11 +84,17 @@ class AndrewCore:
         live = self._event_live[instance_id] = []
         live_tools = self._event_live_tools[instance_id] = []
 
-        try:
-            async for token in self.domain.generate_event(
+        command = getattr(event, "command", "")
+        if command:
+            stream = self._command_stream(command)
+        else:
+            stream = self.domain.generate_event(
                 event.message, getattr(event, "system_message", ""),
                 required_tools=getattr(event, "required_tools", []),
-            ):
+            )
+
+        try:
+            async for token in stream:
                 if isinstance(token, str):
                     for text, is_thinking in think_filter.process(token):
                         if not is_thinking:
@@ -136,6 +155,122 @@ class AndrewCore:
             self._on_event_output(instance_id, event.description, response)
             self._on_event_done(instance_id)
 
+    async def _command_stream(self, cmd: str):
+        """Run a slash command on behalf of an event and stream its output.
+
+        Resolution order matches typed input: built-in commands, then the
+        domain's workflows, then events (which are started on the bus).
+        """
+        response = self.handle_slash(cmd, self.domain.event_bus)
+        if response is not None:
+            yield response
+            return
+        workflow = self.domain.run_workflow(cmd)
+        if workflow is not None:
+            async for token in workflow:
+                yield token
+            return
+        try:
+            event = registry.parse_slash_command(cmd)
+        except ValueError as exc:
+            yield str(exc)
+            return
+        if event is None:
+            yield f"Unknown command: {cmd}"
+            return
+        instance_id = self.domain.event_bus.add(event)
+        yield f"✓ Event '{event.name}' started [{instance_id}]"
+
+    # ------------------------------------------------------------------
+    # Automations
+    # ------------------------------------------------------------------
+
+    def arm_automations(self) -> tuple[list[str], list[str]]:
+        """Start the enabled automations that apply to the active domain.
+
+        Must run on the event bus loop. Startup triggers fire only the
+        first time an automation is armed in this session. Returns
+        ``(instance_ids, load_errors)``.
+        """
+        bus = self.domain.event_bus
+        automations, errors = registry.automations()
+        armed: list[str] = []
+        for automation in automations:
+            if not automation.enabled or not automation.applies_to(self.domain.name):
+                continue
+            first = automation.name not in self._automations_seen
+            self._automations_seen.add(automation.name)
+            run_now = first and automation.runs_at_startup
+            if not run_now and not automation.is_scheduled:
+                continue
+            armed.append(bus.add(AutomationEvent(automation, run_now=run_now)))
+        return armed, errors
+
+    def _disarm_automations(self) -> None:
+        bus = self.domain.event_bus
+        for instance_id, event in bus.events().items():
+            if isinstance(event, AutomationEvent):
+                bus.remove(instance_id)
+
+    def _handle_automations(self, cmd: str) -> str:
+        parts = cmd.split(None, 2)
+        action = parts[1] if len(parts) > 1 else ""
+
+        if action == "reload":
+            def _reload():
+                self._disarm_automations()
+                return self.arm_automations()
+            armed, errors = self._on_loop(_reload)
+            lines = [f"✓ {len(armed)} automation(s) armed" + (f": {', '.join(armed)}" if armed else "")]
+            lines += [f"  ✗ {error}" for error in errors]
+            return "\n".join(lines)
+
+        if action == "run":
+            if len(parts) < 3:
+                return "Usage: /automations run [name]"
+            automations, _ = registry.automations()
+            automation = next((a for a in automations if a.name == parts[2].strip()), None)
+            if automation is None:
+                return f"No automation named '{parts[2].strip()}'"
+            instance_id = self._on_loop(
+                lambda: self.domain.event_bus.add(AutomationEvent(automation, oneshot=True))
+            )
+            return f"✓ Automation '{automation.name}' started [{instance_id}]"
+
+        if action:
+            return "Usage: /automations | /automations reload | /automations run [name]"
+        return self._format_automations()
+
+    def _format_automations(self) -> str:
+        automations, errors = registry.automations()
+        if not automations and not errors:
+            return f"No automations defined. Add *.yaml files to {registry.automations_dir}"
+        armed = {
+            event.name: event for event in self.domain.event_bus.events().values()
+            if isinstance(event, AutomationEvent)
+        }
+        now = datetime.now()
+        lines = ["Automations:\n"]
+        for automation in sorted(automations, key=lambda a: a.name):
+            event = armed.get(automation.name)
+            if not automation.enabled:
+                state = "disabled"
+            elif not automation.applies_to(self.domain.name):
+                state = f"inactive in this domain (domain: {', '.join(automation.domains)})"
+            elif event is None:
+                state = "done" if automation.name in self._automations_seen else "not armed"
+            elif event.next_run is None or event.next_run <= now:
+                state = "running"
+            else:
+                state = f"next run {event.next_run:%Y-%m-%d %H:%M}"
+            lines.append(
+                f"- {automation.name} [{state}] — {automation.describe_trigger()} → {automation.run}\n"
+            )
+        if errors:
+            lines.append("Errors:\n")
+            lines += [f"- {error}\n" for error in errors]
+        return "\n".join(lines)
+
     # ------------------------------------------------------------------
     # Slash command handling  (/events  /stop  /status)
     # ------------------------------------------------------------------
@@ -159,7 +294,14 @@ class AndrewCore:
             return registry.list_events(bus.running())
 
         if cmd == "/workflows":
+            self.domain.load_workflows()
             return registry.list_workflows(self.domain.workflows)
+
+        if cmd == "/skills":
+            return registry.list_skills(self.domain.name)
+
+        if cmd == "/automations" or cmd.startswith("/automations "):
+            return self._handle_automations(cmd)
 
         if cmd in ("/rag", "/rag status"):
             return self.domain.rag.status()
@@ -181,7 +323,7 @@ class AndrewCore:
                 running = bus.running()
                 return ("Running: " + ", ".join(running)) if running else "No events running."
             key = parts[1]
-            if bus.remove(key):
+            if self._on_loop(lambda: bus.remove(key)):
                 for store in (
                     self._event_log, self._event_tool_log,
                     self._event_live, self._event_live_tools,

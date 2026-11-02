@@ -15,6 +15,8 @@ Each event defines two things:
 
 If the event sets a `message` string, the `EventBus` calls `domain.generate_event()` — a fresh, isolated LLM call that never touches the conversation memory or affects routing for user queries.
 
+If the event sets a `command` string instead (e.g. `"/summarize notes.md"`), the dispatch runs it as a slash command — a built-in, a workflow of the active domain, or another event — and records its output like a generated response. [Automations](automations.md) are built on this.
+
 ### Background dispatch (CLI)
 
 In the CLI, event generation runs **entirely in the background** — the agent generates its response silently while the user prompt remains active. When generation completes, the result is printed atomically: the current prompt line is cleared, the event banner and response are written, and the prompt is redrawn with any partial input the user had typed. The user can type commands (including `/stop`) at any time between event iterations.
@@ -46,6 +48,8 @@ Events are activated at runtime via slash commands — no domain restart require
 ```
 /help                                — show built-in commands (/clear, /reset, /events, etc.)
 /events                              — list available events and which are running
+/skills                              — list the skills of the active domain
+/automations [reload|run name]       — list, re-arm, or run automations (see automations.md)
 /stop [name]                         — stop a running event by name (clears its status log)
 /stop                                — list the names of currently running events
 /status                              — list all events with status and iteration count

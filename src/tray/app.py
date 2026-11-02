@@ -22,9 +22,6 @@ from src.shared.config import Config
 from src.tray.controller import TrayController
 from src.tray.icon import create_tray
 from src.tray.panel import ChatPanel
-# Re-exported for backwards compatibility with code that imports
-# ``StreamWorker`` from ``src.tray.app``.
-from src.tray.worker import StreamWorker  # noqa: F401
 
 
 class AndrewTrayApp:
@@ -76,7 +73,7 @@ class AndrewTrayApp:
         chat panel so the user sees the streamed response.
         """
         self.tray.showMessage("Andrew", f"Event triggered: {event.name}")
-        if event.message and not self.panel.isVisible():
+        if (event.message or event.command) and not self.panel.isVisible():
             self.panel.toggle()
 
     def _toggle(self):

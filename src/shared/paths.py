@@ -7,7 +7,7 @@ against fixed roots, regardless of the process' later cwd:
   package lives). Used to locate code shipped with the package.
 * ``CONFIG_DIR`` — the user's runtime configuration directory at
   ``~/.config/andrewcli/``. Hosts the global ``config.yaml`` plus the
-  user-customizable ``domains/`` and ``events/`` trees. Created and
+  user-customizable ``domains/``, ``events/``, and ``automations/`` trees. Created and
   seeded from the bundled defaults on first import.
 * ``CACHE_DIR`` — disposable generated data under the platform cache root,
   including per-domain RAG extraction and embedding caches.
@@ -47,6 +47,7 @@ CONFIG_DIR  = Path.home() / ".config" / "andrewcli"
 CONFIG_FILE = CONFIG_DIR / "config.yaml"
 DOMAINS_DIR = CONFIG_DIR / "domains"
 EVENTS_DIR  = CONFIG_DIR / "events"
+AUTOMATIONS_DIR = CONFIG_DIR / "automations"
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "andrewcli"
 RAG_CACHE_DIR = CACHE_DIR / "rag"
 

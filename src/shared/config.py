@@ -42,9 +42,6 @@ class Config:
 
         rag = config.get("rag", {}) or {}
         self.rag_enabled = bool(rag.get("enabled", True))
-        self.rag_top_sections = int(rag.get("top_sections", 5))
-        self.rag_top_chunks = int(rag.get("top_chunks", 4))
-        self.rag_max_context_chars = int(rag.get("max_context_chars", 8000))
         self.rag_reranker_model = str(rag.get(
             "reranker_model",
             "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
@@ -54,8 +51,6 @@ class Config:
             "embedding_model",
             "intfloat/multilingual-e5-small",
         ))
-        self.rag_dense_candidates = int(rag.get("dense_candidates", 48))
-        self.rag_cache_enabled = bool(rag.get("cache_enabled", True))
         self.rag_ann_threshold = int(rag.get("ann_threshold", 50000))
         self.rag_ann_shard_size = int(rag.get("ann_shard_size", 100000))
         self.rag_watch = bool(rag.get("watch", True))

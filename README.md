@@ -39,14 +39,9 @@ memory:
 
 rag:
   enabled: true
-  top_sections: 5
-  top_chunks: 4
-  max_context_chars: 8000
   reranker_model: "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
   rerank_candidates: 48
   embedding_model: "intfloat/multilingual-e5-small"
-  dense_candidates: 48
-  cache_enabled: true
   ann_threshold: 50000
   ann_shard_size: 100000
   watch: true
@@ -59,11 +54,11 @@ server:
 
 ### Knowledge base
 
-Place documents in the active domain's `~/.config/andrewcli/domains/<name>/knowledgebase/` folder. PDF, DOCX, PPTX, HTML, Markdown, text, and common image formats are parsed locally; scanned pages and images use local OCR, and table rows retain column/value associations. AndrewCLI combines contextual BM25 with multilingual dense retrieval, fuses both rankings, and applies a local cross-encoder before returning four cited excerpts. Changed files are refreshed automatically.
+Place documents in the active domain's `~/.config/andrewcli/domains/<name>/knowledgebase/` folder. PDF, DOCX, PPTX, HTML, Markdown, text, and common image formats are parsed locally; scanned pages and images use local OCR, and table rows retain column/value associations. Changed files are refreshed automatically.
 
-Extracted chunks, file fingerprints, and float32 embeddings are cached in `~/.cache/andrewcli/rag/<domain>.sqlite3`. Unchanged files reload without Docling parsing or embedding generation; changed documents are updated incrementally in a transaction. SQLite FTS5 provides persistent BM25 search. Dense retrieval uses exact batched scans for small collections and disk-backed, memory-mapped USearch HNSW shards above `ann_threshold`, so query memory remains bounded as the corpus grows. Set `cache_enabled: false` to restore the legacy fully in-memory behavior.
+Extracted chunks, file fingerprints, and float32 embeddings are cached in `~/.cache/andrewcli/rag/<domain>.sqlite3`. Unchanged files reload without Docling parsing or embedding generation; changed documents are updated incrementally in a transaction. SQLite FTS5 provides persistent BM25 search. Dense retrieval uses exact batched scans for small collections and disk-backed, memory-mapped USearch HNSW shards above `ann_threshold`, so query memory remains bounded as the corpus grows.
 
-Automatic retrieval is supplemented by bounded, turn-scoped agentic tools. The model can issue up to three additional retrieval calls using hybrid, lexical, semantic, source/section-filtered, or neighboring-chunk lookup, and use deterministic arithmetic after retrieving every operand. Tool evidence is removed from conversation memory after the turn; final answers and citations remain. `/rag metrics` reports automatic and agent-initiated retrieval latency separately.
+The knowledge base is consulted only through bounded, turn-scoped tools, so the model decides per turn whether a request needs the documents. It can issue up to three retrieval calls (hybrid BM25 + multilingual dense search fused and reranked by a local cross-encoder, or lexical, semantic, source/section-filtered, and neighboring-chunk lookups) and use deterministic arithmetic after retrieving every operand. The tools are offered only when the domain has indexed documents. Tool evidence is removed from conversation memory after the turn; final answers and citations remain. `/rag metrics` reports tool-call and indexing latency.
 
 On Linux systems without NVIDIA CUDA, install the CPU-only PyTorch wheels after installing AndrewCLI: `pip install --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cpu`. AndrewCLI refuses to initialize Docling with an incompatible CUDA or Triton runtime rather than risking a native process crash.
 
@@ -134,6 +129,8 @@ Andrew: Current price is $102.4/bbl — above threshold, continuing.
 | `/help` | Show built-in commands (`/clear`, `/reset`, `/events`, `/workflows`, etc.) |
 | `/events` | List available event types and which are running (with instance IDs) |
 | `/workflows` | List workflows available in the active domain |
+| `/skills` | List the skills (and their descriptions) of the active domain |
+| `/automations` | List automations, their trigger, and next run (`reload` to re-arm, `run [name]` to run now) |
 | `/name [args]` | Start a named event or invoke a workflow — events return an instance ID, workflows stream immediately |
 | `/stop [id\|name]` | Stop by instance ID (`loop#1`) or name (stops all instances of that type) |
 | `/status` | List all events with recorded output and iteration count |
@@ -156,7 +153,7 @@ Andrew: Current price is $102.4/bbl — above threshold, continuing.
 | **ESC** | Hide the panel window |
 | **▽ / △ button** | Toggle compact / expanded view |
 | `/help` | Show built-in commands (`/clear`, `/reset`, `/events`, `/workflows`, etc.) |
-| `/workflows` | List workflows available in the active domain |
+| `/workflows`, `/skills`, `/automations` | Same as CLI |
 | `/events`, `/name [args]`, `/stop [id\|name]`, `/status [id]` | Same as CLI |
 | `/clear` | Clear the chat display (text only, memory is kept) |
 | `/reset` | Clear conversation memory (text is kept) |
@@ -170,5 +167,6 @@ Andrew: Current price is $102.4/bbl — above threshold, continuing.
 | Core architecture, domains, tools, skills, tray, async pipeline | [doc/architecture.md](doc/architecture.md) |
 | Rolling memory and context-aware router | [doc/memory.md](doc/memory.md) |
 | Events, slash commands, ProjectEvent, LoopEvent, MonitorEvent | [doc/events.md](doc/events.md) |
+| Automations: scheduled prompts, workflows, and events | [doc/automations.md](doc/automations.md) |
 | HTTP API endpoints and curl examples | [doc/api.md](doc/api.md) |
 | Adding tools, skills, domains, events, and workflows | [doc/extending.md](doc/extending.md) |

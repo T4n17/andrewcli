@@ -14,6 +14,7 @@ class Event(ABC):
     description: str
     message: str = ""        # if set, used as the user-turn trigger for dispatch
     system_message: str = "" # if set, injected as system-level instructions in the fresh event LLM
+    command: str = ""        # if set, dispatched as a slash command (built-in, workflow, or event) instead of a prompt
     required_tools: list[str] = []  # tool names that must be available regardless of routing
 
     def on_response(self, response: str) -> None:
@@ -55,7 +56,7 @@ class EventBus:
     instance ID or a bare name (which removes *all* instances of that
     type).
 
-    Set `notify` and `dispatch` before calling `start()` — these are
+    Set `notify` and `dispatch` before adding events — these are
     injected by the app layer so that each surface (CLI, tray) can handle
     notification and rendering in its own way.
 
@@ -70,17 +71,10 @@ class EventBus:
         self.notify: Callable[[Event], None] | None = None
         self.dispatch: Callable[[Event], Awaitable] | None = None
 
-    async def start(self) -> None:
-        """No-op entry point kept for API compatibility.
-
-        All event tasks are created and managed by :py:meth:`add`; there
-        are no pre-seeded events to start here.
-        """
-
     def add(self, event: Event) -> str:
         """Start a new event and return its unique instance ID.
 
-        Safe to call after start() — creates an independent asyncio task
+        Must run on the event loop — creates an independent asyncio task
         that is tracked so :py:meth:`remove` / :py:meth:`stop` cancel it.
         notify and dispatch must already be set before the event first fires.
         """
@@ -118,6 +112,10 @@ class EventBus:
             del self._events[iid]
         return True
 
+    def events(self) -> dict[str, Event]:
+        """Return ``{instance_id: event}`` for every currently active event."""
+        return {iid: self._events[iid] for iid in self.running()}
+
     def running(self) -> list[str]:
         """Return instance IDs of all currently active (non-done) events."""
         return [
@@ -141,7 +139,7 @@ class EventBus:
                 system_message = event.system_message
                 if self.notify and not getattr(event, "silent", False):
                     self.notify(event)
-                if (message or system_message) and self.dispatch:
+                if (message or system_message or event.command) and self.dispatch:
                     await self.dispatch(event)
             except asyncio.CancelledError:
                 break

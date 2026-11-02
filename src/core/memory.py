@@ -23,9 +23,12 @@ MERGE_SYSTEM_PROMPT = (
 
 
 class Memory:
-    def __init__(self):
+    def __init__(self, enabled: bool | None = None):
+        """*enabled* overrides ``memory.enabled`` from the config. A disabled
+        memory neither loads nor saves ``memory.json`` and makes no summary
+        calls, which is what one-shot background generations need."""
         cfg = Config()
-        self.enabled = cfg.memory_enabled
+        self.enabled = cfg.memory_enabled if enabled is None else enabled
         self.min_summary_chars = cfg.memory_min_summary_chars
 
         self.system_prompt = None

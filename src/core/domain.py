@@ -1,13 +1,12 @@
 import asyncio
-import importlib
 import logging
-import sys
 from pathlib import Path
 
 import yaml
 
 from src.core.event import EventBus
 from src.core.llm import LLM, RouteEvent
+from src.core.memory import Memory
 from src.core.rag import KnowledgeBase
 from src.core.registry import registry
 from src.core.router import ToolRouter
@@ -36,7 +35,8 @@ class Domain:
     * ``system_prompt.md`` — optional, system prompt text.
     * ``tools/*.py``       — optional, :class:`Tool` subclasses.
     * ``skills/*.md``      — optional, frontmatter-driven skills.
-    * ``knowledgebase/``   — optional, documents retrieved for user turns.
+    * ``knowledgebase/``   — optional, documents searchable through the
+                             knowledge tools when a turn needs them.
 
     There is no longer a per-domain Python class: the same ``Domain``
     instance is reused for every domain, parametrised by ``name``.
@@ -65,9 +65,7 @@ class Domain:
         self.llm = LLM(api_base_url=self.api_base_url, model=self.model)
         self.llm.set_system_prompt(self.system_prompt)
 
-        self.workflows = registry.workflows(f"domains.{name}.workflows")
-        for wf in self.workflows:
-            wf.configure(self.llm.client, self.llm.model, self.tools)
+        self.load_workflows()
         self.router = ToolRouter(
             api_base_url=self.llm.api_base_url,
             model=self.llm.model,
@@ -76,10 +74,8 @@ class Domain:
         cfg = Config()
         self.rag = KnowledgeBase(
             self._domain_dir / "knowledgebase",
+            cache_path=RAG_CACHE_DIR / f"{name}.sqlite3",
             enabled=getattr(cfg, "rag_enabled", True),
-            top_sections=getattr(cfg, "rag_top_sections", 5),
-            top_chunks=getattr(cfg, "rag_top_chunks", 4),
-            max_context_chars=getattr(cfg, "rag_max_context_chars", 8000),
             reranker_model=getattr(
                 cfg,
                 "rag_reranker_model",
@@ -90,12 +86,6 @@ class Domain:
                 cfg,
                 "rag_embedding_model",
                 "intfloat/multilingual-e5-small",
-            ),
-            dense_candidates=getattr(cfg, "rag_dense_candidates", 48),
-            cache_path=(
-                RAG_CACHE_DIR / f"{name}.sqlite3"
-                if getattr(cfg, "rag_cache_enabled", True)
-                else None
             ),
             ann_threshold=getattr(cfg, "rag_ann_threshold", 50000),
             ann_shard_size=getattr(cfg, "rag_ann_shard_size", 100000),
@@ -181,28 +171,11 @@ class Domain:
         Memory and the event bus are left untouched.
         """
         domain_dir = self._domain_dir
-        tools_pkg = f"domains.{self.name}.tools"
 
-        # Reload all already-imported tool modules so in-place edits are picked up.
-        try:
-            pkg_mod = sys.modules.get(tools_pkg)
-            if pkg_mod and getattr(pkg_mod, "__file__", None):
-                pkg_path = Path(pkg_mod.__file__).parent
-                for path in sorted(pkg_path.glob("*.py")):
-                    if path.stem == "__init__":
-                        continue
-                    mod_name = f"{tools_pkg}.{path.stem}"
-                    if mod_name in sys.modules:
-                        importlib.reload(sys.modules[mod_name])
-        except Exception:
-            log.exception("domain reload: failed to reload tool modules")
-
-        # Re-discover tools, skills, and workflows from disk.
-        self.tools = registry.tools(tools_pkg)
+        # Re-discover tools and skills from disk; the registry re-imports
+        # modules whose files changed.
+        self.tools = registry.tools(f"domains.{self.name}.tools")
         self.skills = registry.skills(domain_dir / "skills")
-        self.workflows = registry.workflows(f"domains.{self.name}.workflows")
-        for wf in self.workflows:
-            wf.configure(self.llm.client, self.llm.model, self.tools)
 
         # Reload system prompt if the file changed.
         new_prompt = self._load_system_prompt(domain_dir)
@@ -215,16 +188,25 @@ class Domain:
         old_api, old_model = self.api_base_url, self.model
         self._apply_config(self._load_domain_config())
         if self.api_base_url != old_api or self.model != old_model:
-            old_memory = self.llm.memory
-            self.llm = LLM(api_base_url=self.api_base_url, model=self.model)
-            self.llm.memory = old_memory
+            self.llm = LLM(
+                api_base_url=self.api_base_url,
+                model=self.model,
+                memory=self.llm.memory,
+            )
             self.llm.set_system_prompt(self.system_prompt)
             self.router = ToolRouter(
                 api_base_url=self.llm.api_base_url,
                 model=self.llm.model,
             )
-            for wf in self.workflows:
-                wf.configure(self.llm.client, self.llm.model)
+
+        # Last, so workflows get the current client, model, and tools.
+        self.load_workflows()
+
+    def load_workflows(self) -> None:
+        """Re-discover workflows and bind them to the current LLM and tools."""
+        self.workflows = registry.workflows(f"domains.{self.name}.workflows")
+        for wf in self.workflows:
+            wf.configure(self.llm.client, self.llm.model, self.tools)
 
     def close(self) -> None:
         self.event_bus.stop()
@@ -242,6 +224,7 @@ class Domain:
         delegating to :meth:`~src.core.workflow.Workflow.run`, so workflow
         execution is serialised with user turns and event dispatches.
         """
+        self.load_workflows()
         result = registry.parse_workflow_command(self.workflows, cmd)
         if result is None:
             return None
@@ -283,7 +266,13 @@ class Domain:
                     tools.append(tool)
                     existing_names.add(tool.name)
 
-            event_llm = LLM(api_base_url=self.llm.api_base_url, model=self.llm.model)
+            # A disabled Memory keeps the run isolated: it neither sees the
+            # conversation summary nor writes the exchange to memory.json.
+            event_llm = LLM(
+                api_base_url=self.llm.api_base_url,
+                model=self.llm.model,
+                memory=Memory(enabled=False),
+            )
             if system_message:
                 combined = "\n\n".join(filter(None, [self.system_prompt, system_message]))
                 event_llm.set_system_prompt(combined)
@@ -300,13 +289,10 @@ class Domain:
         # closed early via aclose()). See `busy_lock` docstring.
         async with self.busy_lock:
             self.reload()
-            context = await self.rag.retrieve(
-                prompt,
-                previous_query=self.llm.memory.last_user_prompt,
-            )
+            # The knowledge base is only consulted through its tools, so the
+            # model decides per turn whether the request needs the documents.
             knowledge_tools = self.rag.agent_tools()
-            if knowledge_tools:
-                context = "\n\n".join(filter(None, [context, self.rag.agent_guidance()]))
+            context = self.rag.agent_guidance() if knowledge_tools else ""
             if self.routing_enabled:
                 tools, skills = await self.router.route(
                     prompt, self.tools, self.skills,

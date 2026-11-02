@@ -6,7 +6,7 @@ import tty
 
 from src.core.llm import ToolEvent, ToolResultEvent, RouteEvent, format_tool_status
 from src.cli.animations import Spinner
-from src.cli.filter import ThinkFilter
+from src.core.think_filter import ThinkFilter
 
 
 class StreamRenderer:

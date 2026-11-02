@@ -143,7 +143,7 @@ run: "Read todo.md and list what is still open."
 
 ## Add a new Event
 
-Events live in `~/.config/andrewcli/events/`. They are auto-discovered the moment the file is saved — no import or registration needed.
+Custom events live in `~/.config/andrewcli/events/`. They are auto-discovered the moment the file is saved — no import or registration needed. A custom event with the same `name` as a built-in (`src/events/`) overrides it; to build on a built-in, import it from the package (`from src.events.file import FileEvent`).
 
 Choose your base class based on what the event needs to do:
 

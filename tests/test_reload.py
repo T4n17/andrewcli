@@ -81,11 +81,68 @@ class RegistryReloadTests(unittest.TestCase):
 
     def test_broken_event_module_is_logged_not_hidden(self):
         (self.events_dir / "broken_evt.py").write_text("")
-        registry = Registry(self.root / "domains", self.events_dir, self.root / "automations")
+        registry = Registry(
+            self.root / "domains", self.events_dir, self.root / "automations",
+            builtin_events_dir=self.root / "no_builtins",
+        )
         with mock.patch("src.core.registry.importlib.import_module", side_effect=RuntimeError("boom")), \
                 self.assertLogs("src.core.registry", level="ERROR") as logs:
             self.assertEqual(registry.events(), {})
         self.assertIn("broken_evt.py", logs.output[0])
+
+
+class EventDiscoveryTests(unittest.TestCase):
+    def test_builtins_are_discovered_and_user_events_override_them(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events = Path(directory) / "events"
+            events.mkdir()
+            module = f"user_timer_{id(self)}"
+            (events / f"{module}.py").write_text(
+                "from src.events.timer import TimerEvent\n\n"
+                "class MyTimer(TimerEvent):\n"
+                "    name = 'timer'\n"
+            )
+            registry = Registry(Path(directory) / "domains", events, Path(directory) / "automations")
+            sys.path.insert(0, directory)
+            try:
+                with mock.patch.dict(sys.modules):
+                    sys.modules["events"] = __import__("types").ModuleType("events")
+                    sys.modules["events"].__path__ = [str(events)]
+                    found = registry.events()
+            finally:
+                sys.path.remove(directory)
+
+        self.assertTrue({"loop", "project", "monitor", "file", "schedule"} <= set(found))
+        self.assertEqual(found["timer"].__name__, "MyTimer")
+
+    def test_migration_removes_identical_copies_once(self):
+        from src.shared import paths
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory)
+            builtins = config / "builtins"
+            events = config / "events"
+            builtins.mkdir()
+            events.mkdir()
+            (builtins / "timer.py").write_text("same")
+            (builtins / "monitor.py").write_text("from src.events.file import FileEvent")
+            (builtins / "loop.py").write_text("new version")
+            (events / "timer.py").write_text("same")
+            (events / "monitor.py").write_text("from events.file import FileEvent")
+            (events / "loop.py").write_text("old version")
+            (events / "mine.py").write_text("custom")
+            with mock.patch.multiple(
+                paths, CONFIG_DIR=config, EVENTS_DIR=events, BUILTIN_EVENTS_DIR=builtins,
+            ), mock.patch("sys.stderr") as stderr:
+                paths._migrate_bundled_event_copies()
+                (events / "timer.py").write_text("same")
+                paths._migrate_bundled_event_copies()
+            remaining = sorted(p.name for p in events.iterdir())
+
+        self.assertEqual(remaining, ["loop.py", "mine.py", "timer.py"])
+        reported = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertIn("loop.py differs", reported)
+        self.assertEqual(reported.count("differs"), 1)
 
 
 class WorkflowConfigurationTests(unittest.TestCase):

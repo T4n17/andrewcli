@@ -79,10 +79,10 @@ Possible states in `/automations`: `next run …`, `running`, `done` (startup-on
 
 ## How it works
 
-Automations reuse the event machinery instead of adding a scheduler of their own. When a surface (CLI or tray) wires a domain's `EventBus`, at startup and after every domain switch, `AndrewCore.arm_automations()` adds one `AutomationEvent` per applicable automation:
+Automations reuse the event machinery instead of adding a scheduler of their own. Whenever a domain becomes active (at startup and after every domain switch), `AndrewCore.set_domain()` re-arms automations, adding one `AutomationEvent` per automation that applies to that domain to the shared event bus:
 
 - `condition()` sleeps until the next run. It wakes at least every 30 s to re-check the wall clock, so schedules stay correct across system suspend.
 - Prompt runs set `message`. Command runs set the generic `Event.command` attribute, and `AndrewCore._event_dispatch` routes those through built-ins, workflows, and events.
 - Runs are serialized with user turns through `Domain.busy_lock`, logged for `/status`, and notified like any other event (CLI banner, tray balloon).
 
-Because the event bus belongs to a domain, switching domains disarms the previous domain's automations and arms the new domain's.
+Switching domains re-arms automations for the new domain (other running events are unaffected).

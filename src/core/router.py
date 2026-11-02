@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 
 import openai
@@ -25,10 +24,10 @@ class ToolRouter:
     chat model and parses the JSON array in the response.
     """
 
-    def __init__(self, api_base_url: str = None, model: str = None):
-        api_base_url = api_base_url or os.getenv("API_BASE_URL", "http://localhost:8080/v1")
-        self.model = model or os.getenv("MODEL", "qwen3.5:9B")
-        self.client = openai.AsyncOpenAI(base_url=api_base_url, api_key=os.getenv("OPENAI_API_KEY", "local"))
+    def __init__(self, client: openai.AsyncOpenAI, model: str):
+        # Shares the domain LLM's client, so endpoint/model defaults live in one place.
+        self.client = client
+        self.model = model
 
     async def route(
         self,

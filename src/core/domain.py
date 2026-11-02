@@ -1,15 +1,16 @@
 import asyncio
+import hashlib
 import logging
 from pathlib import Path
 
 import yaml
 
-from src.core.event import EventBus
 from src.core.llm import LLM, RouteEvent
 from src.core.memory import Memory
 from src.core.rag import KnowledgeBase
 from src.core.registry import registry
 from src.core.router import ToolRouter
+from src.shared.config import Config
 from src.shared.paths import DOMAINS_DIR, RAG_CACHE_DIR
 
 log = logging.getLogger(__name__)
@@ -66,52 +67,46 @@ class Domain:
         self.llm.set_system_prompt(self.system_prompt)
 
         self.load_workflows()
-        self.router = ToolRouter(
-            api_base_url=self.llm.api_base_url,
-            model=self.llm.model,
-        )
-        from src.shared.config import Config
+        self.router = ToolRouter(self.llm.client, self.llm.model)
         cfg = Config()
         self.rag = KnowledgeBase(
             self._domain_dir / "knowledgebase",
-            cache_path=RAG_CACHE_DIR / f"{name}.sqlite3",
-            enabled=getattr(cfg, "rag_enabled", True),
-            reranker_model=getattr(
-                cfg,
-                "rag_reranker_model",
-                "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
-            ),
-            rerank_candidates=getattr(cfg, "rag_rerank_candidates", 48),
-            embedding_model=getattr(
-                cfg,
-                "rag_embedding_model",
-                "intfloat/multilingual-e5-small",
-            ),
-            ann_threshold=getattr(cfg, "rag_ann_threshold", 50000),
-            ann_shard_size=getattr(cfg, "rag_ann_shard_size", 100000),
-            watch=getattr(cfg, "rag_watch", True),
+            cache_path=self._rag_cache_path(),
+            enabled=cfg.rag_enabled,
+            reranker_model=cfg.rag_reranker_model,
+            rerank_candidates=cfg.rag_rerank_candidates,
+            embedding_model=cfg.rag_embedding_model,
+            ann_threshold=cfg.rag_ann_threshold,
+            ann_shard_size=cfg.rag_ann_shard_size,
+            watch=cfg.rag_watch,
         )
         try:
             self.rag.start()
         except RuntimeError:
             pass
-        # Events are independent of domains — they're registered
-        # dynamically via slash commands (``/timer 30`` etc.). The bus
-        # starts empty and picks them up through ``EventBus.add()``.
-        self.event_bus = EventBus()
-
         # Single "agent busy" lock. Both user turns (generate) and event
         # dispatches (generate_event) acquire it, so:
         #   - only one interaction streams to the UI at a time
         #   - events queue FIFO behind each other and behind user turns
         #   - CLI and tray inherit identical behavior without per-surface
         #     locks
-        # asyncio.Lock guarantees FIFO wake-up of waiters.
+        # asyncio.Lock guarantees FIFO wake-up of waiters. AndrewCore hands
+        # the lock to the next domain on a switch. Events live on
+        # AndrewCore's bus, not here, so they survive domain switches.
         self.busy_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Config loading
     # ------------------------------------------------------------------
+
+    def _rag_cache_path(self) -> Path:
+        """Return the knowledge-base cache, keyed by the domain folder.
+
+        Two config trees with a same-named domain must never share (and
+        re-sync) one index, so the path includes a digest of the folder.
+        """
+        digest = hashlib.sha256(str(self._domain_dir).encode()).hexdigest()[:10]
+        return RAG_CACHE_DIR / f"{self.name}-{digest}.sqlite3"
 
     def _load_domain_config(self) -> dict:
         """Return the parsed per-domain ``config.yaml`` (empty if absent)."""
@@ -132,7 +127,6 @@ class Domain:
         :class:`~src.shared.config.Config` is consulted; otherwise the
         class-level default sticks.
         """
-        from src.shared.config import Config  # local import: avoid cycles
         global_cfg = Config()
         for key in _DOMAIN_OVERRIDE_KEYS:
             if key in domain_cfg and domain_cfg[key] is not None:
@@ -168,7 +162,7 @@ class Domain:
         add/remove/edit a skill file, edit a tool module, flip routing_enabled,
         change api_base_url or model in config.yaml, update system_prompt.md.
 
-        Memory and the event bus are left untouched.
+        Memory is left untouched.
         """
         domain_dir = self._domain_dir
 
@@ -183,9 +177,10 @@ class Domain:
             self.system_prompt = new_prompt
             self.llm.set_system_prompt(new_prompt)
 
-        # Re-read the per-domain config.yaml so model/api/routing edits
-        # take effect on the next turn without a restart.
+        # Re-read the global and per-domain config.yaml so model/api/routing
+        # edits take effect on the next turn without a restart.
         old_api, old_model = self.api_base_url, self.model
+        Config().reload()
         self._apply_config(self._load_domain_config())
         if self.api_base_url != old_api or self.model != old_model:
             self.llm = LLM(
@@ -194,10 +189,7 @@ class Domain:
                 memory=self.llm.memory,
             )
             self.llm.set_system_prompt(self.system_prompt)
-            self.router = ToolRouter(
-                api_base_url=self.llm.api_base_url,
-                model=self.llm.model,
-            )
+            self.router = ToolRouter(self.llm.client, self.llm.model)
 
         # Last, so workflows get the current client, model, and tools.
         self.load_workflows()
@@ -209,7 +201,6 @@ class Domain:
             wf.configure(self.llm.client, self.llm.model, self.tools)
 
     def close(self) -> None:
-        self.event_bus.stop()
         self.rag.stop()
 
     # ------------------------------------------------------------------

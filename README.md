@@ -23,7 +23,7 @@ After installation the `andrewcli` command is available system-wide.
 
 ## Configure
 
-The first time you run `andrewcli`, `~/.config/andrewcli/` is auto-created and seeded with a `config.yaml`, default domains, and events. Edit anything there freely — AndrewCLI never overwrites existing files.
+The first time you run `andrewcli`, `~/.config/andrewcli/` is auto-created and seeded with a `config.yaml`, default domains, and example automations. Built-in events ship with the package; add your own to `~/.config/andrewcli/events/`. Edit anything there freely — AndrewCLI never overwrites existing files.
 
 Open `~/.config/andrewcli/config.yaml` and set your LLM endpoint:
 
@@ -56,7 +56,7 @@ server:
 
 Place documents in the active domain's `~/.config/andrewcli/domains/<name>/knowledgebase/` folder. PDF, DOCX, PPTX, HTML, Markdown, text, and common image formats are parsed locally; scanned pages and images use local OCR, and table rows retain column/value associations. Changed files are refreshed automatically.
 
-Extracted chunks, file fingerprints, and float32 embeddings are cached in `~/.cache/andrewcli/rag/<domain>.sqlite3`. Unchanged files reload without Docling parsing or embedding generation; changed documents are updated incrementally in a transaction. SQLite FTS5 provides persistent BM25 search. Dense retrieval uses exact batched scans for small collections and disk-backed, memory-mapped USearch HNSW shards above `ann_threshold`, so query memory remains bounded as the corpus grows.
+Extracted chunks, file fingerprints, and float32 embeddings are cached in `~/.cache/andrewcli/rag/<domain>-<folder digest>.sqlite3`. Unchanged files reload without Docling parsing or embedding generation; changed documents are updated incrementally in a transaction. SQLite FTS5 provides persistent BM25 search. Dense retrieval uses exact batched scans for small collections and disk-backed, memory-mapped USearch HNSW shards above `ann_threshold`, so query memory remains bounded as the corpus grows.
 
 The knowledge base is consulted only through bounded, turn-scoped tools, so the model decides per turn whether a request needs the documents. It can issue up to three retrieval calls (hybrid BM25 + multilingual dense search fused and reranked by a local cross-encoder, or lexical, semantic, source/section-filtered, and neighboring-chunk lookups) and use deterministic arithmetic after retrieving every operand. The tools are offered only when the domain has indexed documents. Tool evidence is removed from conversation memory after the turn; final answers and citations remain. `/rag metrics` reports tool-call and indexing latency.
 

@@ -1,6 +1,6 @@
 # Events
 
-An **Event** is a self-contained background observer. Each event runs as an asyncio task inside a domain's `EventBus` — which starts empty and is populated at runtime via slash commands (`/timer 30`, `/project "..."`) or the HTTP API. Events are decoupled from domain definitions: the same `events/` catalog is available from every domain.
+An **Event** is a self-contained background observer. Each event runs as an asyncio task on the single `EventBus` owned by `AndrewCore` — which starts empty and is populated at runtime via slash commands (`/timer 30`, `/project "..."`) or the HTTP API. Events are decoupled from domain definitions: the same `events/` catalog is available from every domain.
 
 Each event instance gets a **unique ID** of the form `name#N` (e.g. `loop#1`, `loop#2`), so multiple instances of the same event type can run simultaneously. `/stop loop` stops all loops; `/stop loop#2` stops only that instance.
 
@@ -377,7 +377,9 @@ Most use cases need no code. Subclass `MonitorEvent` and override `_run_sync()` 
 
 ## Event Auto-Discovery
 
-Every file dropped in `~/.config/andrewcli/events/` that defines a concrete `Event` subclass with a `name` string attribute is automatically registered. No manual import or registration step needed. The unified registry (`src/core/registry.py`) is scanned at command parse time, so new events are available immediately after saving the file.
+The built-in events ship with the package (`src/events/`). Every file dropped in `~/.config/andrewcli/events/` that defines a concrete `Event` subclass with a `name` string attribute is registered too, and overrides a built-in with the same `name`. No manual import or registration step needed. The unified registry (`src/core/registry.py`) is scanned at command parse time and re-imports files that changed, so new and edited events are available immediately after saving. To extend a built-in, import it from the package, e.g. `from src.events.file import FileEvent`.
+
+Older versions copied the built-ins into `~/.config/andrewcli/events/`. On first start, unchanged copies are removed; modified ones are kept as overrides and reported once.
 
 ### Defining a new event
 

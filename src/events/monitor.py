@@ -52,7 +52,7 @@ import subprocess
 import tempfile
 from typing import Optional
 
-from events.file import FileEvent
+from src.events.file import FileEvent
 
 
 class MonitorEvent(FileEvent):

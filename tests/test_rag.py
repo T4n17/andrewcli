@@ -448,10 +448,10 @@ class RAGCommandTests(unittest.TestCase):
         core = AndrewCore()
         core.domain = SimpleNamespace(rag=rag)
 
-        self.assertEqual(core.handle_slash("/rag status", None), "RAG [ready]")
-        self.assertEqual(core.handle_slash("/rag metrics", None), "RAG metrics")
+        self.assertEqual(core.handle_slash("/rag status"), "RAG [ready]")
+        self.assertEqual(core.handle_slash("/rag metrics"), "RAG metrics")
         self.assertEqual(
-            core.handle_slash("/rag reindex", None),
+            core.handle_slash("/rag reindex"),
             "✓ Knowledge base reindex started.",
         )
         self.assertTrue(rag.reindexed)

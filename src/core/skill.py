@@ -1,6 +1,8 @@
 import re
 from pathlib import Path
 
+import yaml
+
 from src.core.tool import Tool
 
 
@@ -32,14 +34,7 @@ class Skill(Tool):
                 "(expected '---\\n<meta>\\n---\\n<body>')"
             )
         frontmatter, body = match.group(1), match.group(2)
-
-        meta: dict[str, str] = {}
-        for line in frontmatter.splitlines():
-            line = line.strip()
-            if not line or ":" not in line:
-                continue
-            key, value = line.split(":", 1)
-            meta[key.strip()] = value.strip()
+        meta = _parse_frontmatter(frontmatter)
 
         for required_key in ("name", "description"):
             if required_key not in meta:
@@ -48,15 +43,15 @@ class Skill(Tool):
                 )
 
         self.path = path
-        self.name = meta["name"]
-        self.description = meta["description"]
+        self.name = str(meta["name"])
+        self.description = str(meta["description"])
         self.instructions = body.strip()
 
-        tools_val = meta.get("tools", "").strip()
-        if tools_val.startswith("[") and tools_val.endswith("]"):
-            tools_val = tools_val[1:-1]
+        tools_val = meta.get("tools") or []
+        if not isinstance(tools_val, list):
+            tools_val = str(tools_val).strip().strip("[]").split(",")
         self.required_tools: list[str] = [
-            t.strip() for t in tools_val.split(",") if t.strip()
+            str(t).strip() for t in tools_val if str(t).strip()
         ]
 
     def execute(self) -> str:
@@ -66,3 +61,23 @@ class Skill(Tool):
             "Call the appropriate tools to carry out each action.\n\n"
             + self.instructions
         )
+
+
+def _parse_frontmatter(text: str) -> dict:
+    """Parse frontmatter as YAML, falling back to ``key: value`` lines.
+
+    The fallback keeps hand- or model-written files loading when an
+    unquoted value contains YAML syntax (e.g. ``description: Use: this``).
+    """
+    try:
+        meta = yaml.safe_load(text)
+        if isinstance(meta, dict):
+            return meta
+    except yaml.YAMLError:
+        pass
+    meta = {}
+    for line in text.splitlines():
+        key, sep, value = line.strip().partition(":")
+        if sep:
+            meta[key.strip()] = value.strip()
+    return meta

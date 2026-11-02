@@ -6,7 +6,7 @@ from pathlib import Path
 
 from src.core.andrew import AndrewCore
 from src.core.event import EventBus
-from src.defaults.events.loop import LoopEvent
+from src.events.loop import LoopEvent
 
 
 class EventBusLoopTests(unittest.IsolatedAsyncioTestCase):

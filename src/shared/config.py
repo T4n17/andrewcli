@@ -1,10 +1,22 @@
+import logging
+
 import yaml
 
 from src.shared.paths import CONFIG_FILE
 
+log = logging.getLogger(__name__)
+
+# Keys that are only set when present in config.yaml, so a missing key
+# falls through to the per-domain config or the Domain/LLM defaults.
+_OPTIONAL_KEYS = ("api_base_url", "model", "routing_enabled")
+
 
 class Config:
-    """Singleton: the config file is read once per process."""
+    """Singleton holding ``config.yaml``, the single source of setting defaults.
+
+    Read once per process; :meth:`reload` re-reads it (Domain does so
+    before every user turn, so LLM settings apply without a restart).
+    """
 
     _instance = None
 
@@ -14,6 +26,13 @@ class Config:
             cls._instance._load()
         return cls._instance
 
+    def reload(self) -> None:
+        """Re-read ``config.yaml``, keeping the current values if it is invalid."""
+        try:
+            self._load()
+        except Exception:
+            log.exception("config: keeping previous settings, failed to reload %s", CONFIG_FILE)
+
     def _load(self):
         try:
             with open(CONFIG_FILE, "r") as f:
@@ -21,6 +40,8 @@ class Config:
         except FileNotFoundError as exc:
             raise FileNotFoundError(f"config.yaml not found at {CONFIG_FILE}") from exc
 
+        for key in _OPTIONAL_KEYS:
+            self.__dict__.pop(key, None)
         self.domain = config.get("domain", "general")
 
         # Optional global LLM defaults. A per-domain ``config.yaml`` can

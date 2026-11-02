@@ -1,5 +1,4 @@
 import asyncio
-import inspect
 import os
 import select
 import sys
@@ -51,11 +50,8 @@ class AndrewCLI(AndrewCore):
             new_domain = registry.load_domain(next_name)
         except ValueError:
             return
-        old_domain = self.domain
-        self.domain = new_domain
         self.domain_name = next_name
-        old_domain.close()
-        self._start_event_bus()
+        self._report_automations(*self.set_domain(new_domain))
 
     async def _read_input(self, prompt):
         self._current_prompt = prompt
@@ -143,13 +139,11 @@ class AndrewCLI(AndrewCore):
         sys.stdout.write(f"\r\033[K{text}\n{restore}")
         sys.stdout.flush()
 
-    def _event_notify(self, event):
+    def _on_event_notify(self, event):
+        # Events that dispatch print their banner with the response.
         if not event.message and not event.command:
             instance_id = getattr(event, "_instance_id", event.name)
             self._bg_print(f"\n\033[33m◆ Event [{instance_id}]: {event.description}\033[0m")
-
-    async def _stream_response(self, prompt: str):
-        await self.renderer.render(self.domain.generate(prompt))
 
     async def _await_bridge(self) -> tuple[str, str]:
         while True:
@@ -158,12 +152,22 @@ class AndrewCLI(AndrewCore):
             except Exception:
                 await asyncio.sleep(0.05)
 
-    async def _stream_response_bridged(self, sid: str, message: str) -> None:
+    async def _render(self, stream, sid: str | None = None) -> None:
+        """Render *stream*, mirroring its text into bridge session *sid*."""
+        if sid is None:
+            await self.renderer.render(stream)
+            return
+
         async def _teed():
-            async for token in self.domain.generate(message):
-                if isinstance(token, str):
-                    server.put_token(sid, token)
-                yield token
+            try:
+                async for token in stream:
+                    if isinstance(token, str):
+                        server.put_token(sid, token)
+                    yield token
+            finally:
+                # Release the generation lock now, not at garbage collection,
+                # when the renderer stops early (ESC).
+                await stream.aclose()
 
         try:
             await self.renderer.render(_teed())
@@ -173,25 +177,20 @@ class AndrewCLI(AndrewCore):
         else:
             server.finish(sid)
 
-    # ------------------------------------------------------------------
-    # Main loop
-    # ------------------------------------------------------------------
-
-    def _start_event_bus(self) -> None:
-        """Wire the active domain's bus to this surface and arm automations."""
-        bus = self.domain.event_bus
-        bus.notify = self._event_notify
-        bus.dispatch = self._event_dispatch
-        armed, errors = self.arm_automations()
+    def _report_automations(self, armed: list[str], errors: list[str]) -> None:
         if armed:
             self._bg_print(f"\033[90mAutomations armed: {', '.join(armed)}\033[0m")
         for error in errors:
             self._bg_print(f"\033[31mAutomation skipped: {error}\033[0m")
 
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
+
     async def run(self):
         self.domain.rag.start()
         print("Andrew is running...")
-        self._start_event_bus()
+        self._report_automations(*self.set_domain(self.domain))
         while True:
             prompt_str = f"[{self.domain_name}] Ask: "
             stdin_task = asyncio.create_task(self._read_input(prompt_str))
@@ -220,44 +219,19 @@ class AndrewCLI(AndrewCore):
 
             if user_input.startswith("/"):
                 cmd = user_input.strip()
-                bus = self.domain.event_bus
-                started_event = None
-                response = self.handle_slash(cmd, bus)
-                if cmd == "/clear" and response is not None:
+                result = self.run_command(cmd, bridge_sid=sid)
+                if result.stream is not None:
+                    await self._render(result.stream, sid)
+                    continue
+                if cmd == "/clear":
                     sys.stdout.write("\033[2J\033[H")
-                    sys.stdout.flush()
-                if response is None:
-                    # Workflows run outside the agent loop — stream directly.
-                    wf_gen = self.domain.run_workflow(cmd)
-                    if wf_gen is not None:
-                        await self.renderer.render(wf_gen)
-                        if sid:
-                            server.finish(sid)
-                        continue
-
-                    try:
-                        started_event = registry.parse_slash_command(user_input)
-                    except ValueError as exc:
-                        response = str(exc)
-                        started_event = None
-                    if started_event is not None:
-                        msg_descriptor = inspect.getattr_static(type(started_event), 'message', None)
-                        has_message = isinstance(msg_descriptor, property) or bool(started_event.message)
-                        if sid and has_message:
-                            started_event._bridge_sid = sid
-                        instance_id = bus.add(started_event)
-                        response = f"✓ Event '{started_event.name}' started [{instance_id}]"
-                    else:
-                        response = f"Unknown command: {user_input}\n" + registry.list_builtins()
-                sys.stdout.write(f"\033[32m{response}\033[0m\n")
+                color = 31 if result.error else 32
+                sys.stdout.write(f"\033[{color}m{result.text}\033[0m\n")
                 sys.stdout.flush()
                 if sid:
-                    server.put_token(sid, response)
-                    if not getattr(started_event, '_bridge_sid', None):
+                    server.put_token(sid, result.text)
+                    if not result.holds_session:
                         server.finish(sid)
                 continue
 
-            if sid:
-                await self._stream_response_bridged(sid, user_input)
-            else:
-                await self._stream_response(user_input)
+            await self._render(self.domain.generate(user_input), sid)

@@ -2,18 +2,12 @@
 
 ## Project Structure
 
-AndrewCLI separates **shipped code** (the Python package) from **runtime configuration** (domains, events, the global `config.yaml`). Runtime configuration lives under `~/.config/andrewcli/` and is seeded from bundled defaults the first time `andrewcli` runs, so the user can edit, add, or remove domains and events without touching the installed package.
+AndrewCLI separates **shipped code** (the Python package, including the built-in events) from **runtime configuration** (domains, automations, custom events, the global `config.yaml`). Runtime configuration lives under `~/.config/andrewcli/` and is seeded from bundled defaults the first time `andrewcli` runs, so the user can edit, add, or remove domains, automations, and events without touching the installed package. Built-in events are not copied, so package updates reach every install.
 
 ```
 ~/.config/andrewcli/                # Runtime configuration (auto-seeded)
 ├── config.yaml                     # Global configuration
-├── events/                         # Event definitions — auto-discovered, activated via /name
-│   ├── timer.py
-│   ├── file.py
-│   ├── monitor.py
-│   ├── project.py
-│   ├── loop.py
-│   └── schedule.py
+├── events/                         # Custom events and overrides of built-ins (same name wins)
 ├── automations/                    # Scheduled prompts/commands (*.yaml) — see automations.md
 │   ├── daily_brief.yaml
 │   └── nightly_reset.yaml
@@ -32,8 +26,9 @@ AndrewCLI/                          # Installed package (this repository)
 └── src/
     ├── defaults/                   # Bundled defaults — copied to ~/.config/andrewcli/ on first run
     │   ├── config.yaml
-    │   ├── domains/...
-    │   └── events/...
+    │   ├── automations/...
+    │   └── domains/...
+    ├── events/                     # Built-in events (timer, file, monitor, project, loop, schedule)
     ├── shared/
     │   ├── config.py               # Config class — loads ~/.config/andrewcli/config.yaml
     │   └── paths.py                # Centralized paths (PROJECT_ROOT, CONFIG_DIR, LAUNCH_DIR, DATA_DIR, …)
@@ -41,8 +36,9 @@ AndrewCLI/                          # Installed package (this repository)
     │   ├── andrew.py               # AndrewCore — shared event log, dispatch, slash commands, automation arming (CLI + tray)
     │   ├── automation.py           # Automation definitions, triggers/cron, AutomationEvent
     │   ├── server.py               # FastAPI middleware + shared bridge (inbox queue, session store)
-    │   ├── domain.py               # Domain class (async generator, event bus, busy_lock)
-    │   ├── event.py                # Event ABC + EventBus (add, remove, running, stop)
+    │   ├── domain.py               # Domain class (async generator, busy_lock, hot reload)
+    │   ├── event.py                # Event ABC + EventBus (add, remove, running, events, stop)
+    │   ├── think_filter.py         # ThinkFilter — parses <think> tags for reasoning display
     │   ├── llm.py                  # Async LLM client with streaming + tool-calling loop
     │   ├── memory.py               # Rolling memory with background summarization
     │   ├── registry.py             # Unified auto-discovery: domains, events (+ /slash parsing), tools, skills, automations
@@ -52,7 +48,6 @@ AndrewCLI/                          # Installed package (this repository)
     ├── cli/                        # CLI surface
     │   ├── app.py                  # AndrewCLI — subclasses AndrewCore, adds terminal I/O
     │   ├── animations.py           # Spinner (async, dynamic status)
-    │   ├── filter.py               # ThinkFilter — parses <think> tags for reasoning display
     │   └── renderer.py             # StreamRenderer — spinner + filtering + typewriter streaming + ESC-to-stop
     └── tray/                       # System tray GUI (PyQt6)
         ├── __main__.py
@@ -86,11 +81,11 @@ A **Domain** is a folder under `~/.config/andrewcli/domains/<name>/` that groups
 - **Skills** — auto-discovered from `domains/<name>/skills/*.md`.
 - **Knowledge base** — documents under `domains/<name>/knowledgebase/` are parsed locally. Extraction preserves heading paths and table column/value associations. Per-domain SQLite stores under `~/.cache/andrewcli/rag/` update changed documents transactionally. Dense search is exact below the configured threshold and uses persistent, memory-mapped USearch HNSW shards above it, keeping query memory and latency bounded for large collections. When the domain has indexed documents, every user turn receives internal knowledge tools for bounded iterative search (SQLite FTS5 BM25 fused with multilingual dense search, reranked by a local cross-encoder), source/section filtering, neighboring-chunk lookup, and deterministic arithmetic. The model decides whether to call them; their intermediate evidence is removed before conversation summarization.
 
-Domain configuration is **reloaded before every user turn** via `Domain.reload()`. Tool modules are re-imported with `importlib.reload`, skill files are re-scanned from disk, the system prompt and `config.yaml` are re-read. Flipping `routing_enabled` or pointing the domain at a new endpoint takes effect immediately — no restart required. If `api_base_url` or `model` changes, a new LLM client is created and the existing conversation memory is transplanted into it. Memory and the event bus are never touched by a reload.
+Domain configuration is **reloaded before every user turn** via `Domain.reload()`. Tool, workflow, and event modules whose files changed are re-imported by the registry, skill files are re-scanned from disk, and the system prompt plus both the global and per-domain `config.yaml` are re-read. Flipping `routing_enabled` or pointing the domain at a new endpoint takes effect immediately — no restart required. If `api_base_url` or `model` changes, a new LLM client is created, the existing conversation memory is transplanted into it, and workflows are rebound to it. Other global settings (memory, RAG, server, tray) are read at startup. Memory is never touched by a reload.
 
 The active domain is chosen from the global `config.yaml` (`domain: "general"`) and can be **switched at runtime** with TAB. Domains can optionally override the global LLM endpoint and model per-domain.
 
-Each domain owns an `EventBus` instance that starts empty — events are independent of domains and are added at runtime through slash commands.
+Events are independent of domains: `AndrewCore` owns a single `EventBus`, so running events survive a domain switch and dispatch to whichever domain is active when they fire. On a switch only [automations](automations.md) are re-armed, and the new domain inherits the previous domain's `busy_lock`.
 
 ---
 
@@ -128,17 +123,22 @@ When the LLM invokes a skill, its body is **promoted into the system prompt** as
 
 - **`AndrewCLI`** (`cli/app.py`) — subclasses `AndrewCore`. Adds terminal I/O: `_read_input` (cbreak mode, TAB domain switch, UP/DOWN history, ESC-to-stop), `_bg_print` (atomically clears prompt, prints text, restores prompt), and the main async `run()` loop.
 - **`Spinner`** (`cli/animations.py`) — async spinner with a dynamic `.status` property. Shows what the agent is doing: `⠴ Thinking...`, `⠧ Running execute_command: ls -la`, `⠋ Loading: write_file, read_file`.
-- **`ThinkFilter`** (`cli/filter.py`) — streaming parser for `<think>...</think>` tags. Handles tags split across token boundaries. Renders reasoning in dim italic while keeping the final answer in normal text.
+- **`ThinkFilter`** (`core/think_filter.py`) — streaming parser for `<think>...</think>` tags. Handles tags split across token boundaries. Renders reasoning in dim italic while keeping the final answer in normal text.
 - **`StreamRenderer`** (`cli/renderer.py`) — orchestrates the full output pipeline: spinner lifecycle, `RouteEvent` and `ToolEvent` processing, think filtering, typewriter-effect streaming, ESC-to-stop.
 
 ## AndrewCore
 
-`AndrewCore` (`core/andrew.py`) is the shared logic layer used by both the CLI and the tray. It holds the event output log (`_event_log`, `_event_tool_log`) and live-generation buffers (`_event_live`, `_event_live_tools`), implements `_event_dispatch` (token collection, tool tracking, log update), and exposes `handle_slash` for `/events`, `/workflows`, `/skills`, `/automations`, `/rag`, `/stop`, `/status`, `/clear`, and `/reset`. It also arms [automations](automations.md) whenever a surface wires a domain's event bus.
+`AndrewCore` (`core/andrew.py`) is the shared logic layer used by both the CLI and the tray, and must run on the asyncio loop (the tray calls in through `TrayController._on_loop`). It owns:
 
-Surfaces override three hooks:
+- the single **event bus** and the event output log (`_event_log`, `_event_tool_log`) plus live-generation buffers (`_event_live`, `_event_live_tools`), with `_event_dispatch` handling token collection, tool tracking, and log updates;
+- **command resolution** — `run_command(text, bridge_sid=None)` resolves built-ins (`handle_slash`), then workflows, then events, and returns a `CommandResult` (`text`, `stream` for workflows, `error`, `holds_session` for HTTP bridge sessions). The CLI, the tray, and the HTTP bridge only render that result;
+- the **active domain** — `set_domain(domain)` closes the previous one, hands over its `busy_lock`, and re-arms [automations](automations.md).
+
+Surfaces override four hooks:
 
 | Hook | CLI | Tray |
 |---|---|---|
+| `_on_event_notify(event)` | banner for events that don't dispatch | puts event into Qt queue (balloon, panel) |
 | `_on_event_token(iid, token)` | no-op (prints atomically at end) | puts token into Qt queue (live streaming) |
 | `_on_event_output(iid, desc, response)` | `_bg_print` banner + response | no-op (already streamed) |
 | `_on_event_done(iid)` | no-op | puts `None` sentinel into Qt queue |
@@ -154,7 +154,7 @@ A **PyQt6 system tray application** that uses the same domain classes and async 
 - **`controller.py`** — holds an `AndrewCore` instance that handles all event logging and slash commands (`/events`, `/stop`, `/status`). Manages domain loading and `StreamWorker` lifecycle. Wires `AndrewCore`'s hooks so event tokens are queued for the Qt main thread.
 - **`worker.py`** — `StreamWorker` QThread runs `domain.generate()` on a shared asyncio event loop via `asyncio.run_coroutine_threadsafe`. Emits `token_received`, `tool_status`, `finished`, and `error` signals. Cancellation cancels the asyncio future and sets a flag checked during streaming.
 - **`panel.py`** — `ChatPanel` with a `QLineEdit` input, `QTextBrowser` for streamed markdown output, and header controls. UP/DOWN arrow keys navigate input history. TAB cycles domains. Braille spinner driven by `QTimer` shows tool names during execution and routing. Conversation history is persisted to `$LAUNCH_DIR/.andrewcli/data/conversation.md` and restored on next launch.
-- **Event bridge** — the `EventBus` runs on the shared asyncio loop. A `queue.SimpleQueue` bridges it to the Qt main thread. A `QTimer` polling at 100 ms drains the queue, shows balloon notifications via `QSystemTrayIcon.showMessage`, and routes tokens to the panel — all without blocking the Qt or asyncio loops.
+- **Event bridge** — `AndrewCore`'s `EventBus` runs on the shared asyncio loop. A `queue.SimpleQueue` bridges it to the Qt main thread. A `QTimer` polling at 100 ms drains the queue, shows balloon notifications via `QSystemTrayIcon.showMessage`, and routes tokens to the panel — all without blocking the Qt or asyncio loops.
 - Submitting a new message while generating **cancels the previous generation** and waits before starting a new one.
 
 ---

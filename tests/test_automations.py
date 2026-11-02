@@ -184,7 +184,6 @@ class _FakeMemory:
 class _FakeDomain:
     def __init__(self, name="general"):
         self.name = name
-        self.event_bus = EventBus()
         self.llm = mock.Mock(memory=_FakeMemory())
         self.prompts = []
 
@@ -240,7 +239,7 @@ class CoreAutomationTests(unittest.IsolatedAsyncioTestCase):
         self.core._on_event_output = lambda iid, desc, response: self.outputs.append((iid, response))
 
     def tearDown(self):
-        self.core.domain.event_bus.stop()
+        self.core.bus.stop()
         self._patch.stop()
         self._tmp.cleanup()
 
@@ -267,8 +266,10 @@ class CoreAutomationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(responses["builtin"], "✓ Memory cleared.")
         self.assertTrue(self.core.domain.llm.memory.cleared)
         self.assertTrue(responses["event"].startswith("✓ Event 'tick' started [tick#"))
-        self.assertEqual(responses["unknown"], "Unknown command: /nope")
-        self.assertEqual(list(self.core.domain.event_bus.events().values())[0].label, "hello")
+        self.assertEqual(
+            responses["unknown"], "Unknown command: /nope. Type /help for the list of commands.",
+        )
+        self.assertEqual(list(self.core.bus.events().values())[0].label, "hello")
 
     async def test_arming_respects_enabled_domain_and_startup_once(self):
         self._write("boot", trigger="startup", run="hi")
@@ -280,16 +281,16 @@ class CoreAutomationTests(unittest.IsolatedAsyncioTestCase):
         armed, errors = self.core.arm_automations()
         self.assertEqual(sorted(i.split("#")[0] for i in armed), ["boot", "hourly"])
         self.assertEqual(len(errors), 1)
-        startup = {e.name: e._run_now for e in self.core.domain.event_bus.events().values()}
+        startup = {e.name: e._run_now for e in self.core.bus.events().values()}
         self.assertEqual(startup, {"boot": True, "hourly": True})
 
         # Re-arming (domain switch or reload) never repeats startup runs.
-        reloaded = self.core.handle_slash("/automations reload", self.core.domain.event_bus)
+        reloaded = self.core.handle_slash("/automations reload")
         self.assertIn("1 automation(s) armed: hourly#", reloaded)
-        (event,) = self.core.domain.event_bus.events().values()
+        (event,) = self.core.bus.events().values()
         self.assertFalse(event._run_now)
 
-        listing = self.core.handle_slash("/automations", self.core.domain.event_bus)
+        listing = self.core.handle_slash("/automations")
         self.assertIn("- boot [done]", listing)
         self.assertIn("- hourly [next run ", listing)
         self.assertIn("- off [disabled]", listing)
@@ -298,22 +299,19 @@ class CoreAutomationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_run_now_command(self):
         self._write("later", trigger={"cron": "0 0 1 1 *"}, run="hi", enabled=False)
-        response = self.core.handle_slash("/automations run later", self.core.domain.event_bus)
+        response = self.core.handle_slash("/automations run later")
         self.assertTrue(response.startswith("✓ Automation 'later' started [later#"))
-        (event,) = self.core.domain.event_bus.events().values()
+        (event,) = self.core.bus.events().values()
         self.assertTrue(event._oneshot)
-        self.assertIn("No automation named", self.core.handle_slash(
-            "/automations run missing", self.core.domain.event_bus,
-        ))
+        self.assertIn("No automation named", self.core.handle_slash("/automations run missing"))
 
     def test_skills_listing(self):
-        bus = self.core.domain.event_bus
         self.assertEqual(
-            self.core.handle_slash("/skills", bus),
+            self.core.handle_slash("/skills"),
             "Skills in domain 'general':\n\n- brief — Write a short brief (tools: read_file, write_file)\n",
         )
         self.core.domain.name = "coding"
-        self.assertIn("No skills in domain 'coding'", self.core.handle_slash("/skills", bus))
+        self.assertIn("No skills in domain 'coding'", self.core.handle_slash("/skills"))
 
 
 if __name__ == "__main__":

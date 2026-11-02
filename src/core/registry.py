@@ -11,9 +11,10 @@ Python packages.
   come from ``domains/<name>/config.yaml`` (overrides the global
   ``config.yaml``). :py:meth:`Registry.load_domain` returns a configured
   :class:`~src.core.domain.Domain` instance.
-* **Events** — every ``events/*.py`` file is imported and any
+* **Events** — the built-ins in the ``src.events`` package plus every
+  ``events/*.py`` file in the user's config are imported, and any
   concrete :class:`~src.core.event.Event` subclass with a ``name``
-  attribute is registered. :py:meth:`Registry.parse_slash_command` and
+  attribute is registered (user events override built-ins by name). :py:meth:`Registry.parse_slash_command` and
   :py:meth:`Registry.list_commands` turn user-typed ``/name [args]``
   strings into the right :class:`Event` instance (used identically by
   the CLI, the tray, and the HTTP server).
@@ -53,7 +54,7 @@ from src.core.event import Event
 from src.core.skill import Skill
 from src.core.tool import Tool
 from src.core.workflow import Workflow
-from src.shared.paths import AUTOMATIONS_DIR, DOMAINS_DIR, EVENTS_DIR
+from src.shared.paths import AUTOMATIONS_DIR, BUILTIN_EVENTS_DIR, DOMAINS_DIR, EVENTS_DIR
 
 log = logging.getLogger(__name__)
 
@@ -73,10 +74,12 @@ class Registry:
         domains_dir: Path | str = DOMAINS_DIR,
         events_dir:  Path | str = EVENTS_DIR,
         automations_dir: Path | str = AUTOMATIONS_DIR,
+        builtin_events_dir: Path | str = BUILTIN_EVENTS_DIR,
     ):
         self.domains_dir = Path(domains_dir)
         self.events_dir  = Path(events_dir)
         self.automations_dir = Path(automations_dir)
+        self.builtin_events_dir = Path(builtin_events_dir)
         # Source mtime of every module imported through _import, so edits
         # are picked up on the next discovery without a restart.
         self._mtimes: dict[str, int] = {}
@@ -149,25 +152,34 @@ class Registry:
     # ------------------------------------------------------------------
 
     def events(self) -> dict[str, type[Event]]:
-        """Return ``{event.name: EventClass}`` for every concrete Event in ``events/``."""
+        """Return ``{event.name: EventClass}`` for built-in and user events.
+
+        User events are scanned last, so they override built-ins that
+        share their ``name``.
+        """
         registry: dict[str, type[Event]] = {}
-        if not self.events_dir.is_dir():
-            return registry
-        for path in sorted(self.events_dir.glob("*.py")):
-            if path.stem == "__init__":
+        for directory, package in (
+            (self.builtin_events_dir, "src.events"),
+            (self.events_dir, "events"),
+        ):
+            if not directory.is_dir():
                 continue
-            try:
-                module = self._import(f"events.{path.stem}")
-            except Exception:
-                log.exception("failed to import event module %s", path)
-                continue
-            for _, obj in inspect.getmembers(module, inspect.isclass):
-                if (
-                    issubclass(obj, Event)
-                    and obj is not Event
-                    and isinstance(getattr(obj, "name", None), str)
-                ):
-                    registry[obj.name] = obj
+            for path in sorted(directory.glob("*.py")):
+                if path.stem == "__init__":
+                    continue
+                try:
+                    module = self._import(f"{package}.{path.stem}")
+                except Exception:
+                    log.exception("failed to import event module %s", path)
+                    continue
+                for _, obj in inspect.getmembers(module, inspect.isclass):
+                    if (
+                        issubclass(obj, Event)
+                        and obj is not Event
+                        and obj.__module__ == module.__name__
+                        and isinstance(getattr(obj, "name", None), str)
+                    ):
+                        registry[obj.name] = obj
         return registry
 
     @staticmethod

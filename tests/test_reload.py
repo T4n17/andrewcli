@@ -145,6 +145,38 @@ class EventDiscoveryTests(unittest.TestCase):
         self.assertEqual(reported.count("differs"), 1)
 
 
+class GenerateEventToolsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_only_tools_limits_tools_and_drops_skills(self):
+        import asyncio
+
+        seen = {}
+
+        class FakeLLM:
+            def __init__(self, **kwargs):
+                self.api_base_url, self.model = "u", "m"
+
+            def set_system_prompt(self, prompt):
+                pass
+
+            async def generate(self, prompt, tools, skills):
+                seen.update(tools=[t.name for t in tools], skills=skills)
+                yield "ok"
+
+        domain = Domain.__new__(Domain)
+        domain.busy_lock = asyncio.Lock()
+        domain.routing_enabled = True  # must not be consulted
+        domain.router = None
+        domain.system_prompt = ""
+        domain.llm = FakeLLM()
+        domain.tools = [SimpleNamespace(name="read_file"), SimpleNamespace(name="execute_command")]
+        domain.skills = [SimpleNamespace(name="brief", required_tools=["execute_command"])]
+        with mock.patch("src.core.domain.LLM", FakeLLM):
+            [_ async for _ in domain.generate_event("p", only_tools=["read_file"])]
+            self.assertEqual(seen, {"tools": ["read_file"], "skills": []})
+            [_ async for _ in domain.generate_event("p", only_tools=[])]
+            self.assertEqual(seen, {"tools": [], "skills": []})
+
+
 class WorkflowConfigurationTests(unittest.TestCase):
     def test_workflows_keep_tools_after_reconfiguration(self):
         class Probe(Workflow):

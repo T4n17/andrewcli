@@ -227,7 +227,13 @@ class Domain:
             async for token in wf.run(**kwargs):
                 yield token
 
-    async def generate_event(self, prompt: str, system_message: str = "", required_tools: list[str] | None = None):
+    async def generate_event(
+        self,
+        prompt: str,
+        system_message: str = "",
+        required_tools: list[str] | None = None,
+        only_tools: list[str] | None = None,
+    ):
         """One-shot generation for event dispatches.
 
         Routes to the right tools like generate() does, but uses a fresh LLM
@@ -238,12 +244,18 @@ class Domain:
         prompt so event instructions carry system-level authority rather than
         being sent as a user message.
 
+        If `only_tools` is given, the model gets exactly those tools and no
+        skills. Use it when the prompt carries untrusted text, so that text
+        cannot steer the model into running other tools.
+
         Serialized via `busy_lock` so events queue behind any in-flight
         user turn or earlier event.
         """
         async with self.busy_lock:
             route_text = system_message or prompt
-            if self.routing_enabled:
+            if only_tools is not None:
+                tools, skills = [t for t in self.tools if t.name in only_tools], []
+            elif self.routing_enabled:
                 tools, skills = await self.router.route(route_text, self.tools, self.skills)
             else:
                 tools, skills = list(self.tools), list(self.skills)

@@ -15,6 +15,8 @@ class Event(ABC):
     message: str = ""        # if set, used as the user-turn trigger for dispatch
     system_message: str = "" # if set, injected as system-level instructions in the fresh event LLM
     command: str = ""        # if set, dispatched as a slash command (built-in, workflow, or event) instead of a prompt
+    analyze: str = ""        # if set, the dispatch output goes to the agent with this instruction; the user sees its answer
+    analyze_tools: list[str] = []  # tool names the analysis may use (none by default)
     required_tools: list[str] = []  # tool names that must be available regardless of routing
 
     def on_response(self, response: str) -> None:

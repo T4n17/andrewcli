@@ -9,15 +9,23 @@ that pairs one or more **triggers** with a single **run** string::
     domain: general                    # optional str or list; default: every domain
     silent: false                      # optional, log to /status only
     tools: [google_search]             # optional, tools forced into prompt runs
+                                       # and allowed in the analysis
     trigger:
       at: "08:30"
       days: weekdays
     run: "Summarize today's top headlines."
+    analyze: "..."                     # optional, see below
 
 ``run`` is interpreted exactly like typed input: text starting with
 ``/`` is a slash command (built-in, workflow, or event), anything else
 is a prompt answered by an isolated, memory-free generation — the same
 path background events use.
+
+With ``analyze``, the output of ``run`` is not shown directly: it goes to the
+agent with that instruction, and the user sees the agent's answer. If ``run``
+starts an event, each of that event's outputs is analyzed. The analysis has no
+tools except those listed under ``tools``, because the output may contain
+untrusted text such as web pages.
 
 Supported triggers (a single mapping, or a list of them for "whichever
 comes first"):
@@ -335,6 +343,7 @@ class Automation:
     enabled: bool = True
     silent: bool = False
     tools: list[str] = field(default_factory=list)
+    analyze: str = ""
     path: Path | None = None
 
     @classmethod
@@ -349,6 +358,7 @@ class Automation:
     def from_dict(cls, data: dict, default_name: str = "", path: Path | None = None) -> "Automation":
         unknown = set(data) - {
             "name", "description", "enabled", "domain", "silent", "tools", "trigger", "run",
+            "analyze",
         }
         if unknown:
             raise ValueError(f"unknown key(s): {', '.join(sorted(unknown))}")
@@ -369,6 +379,7 @@ class Automation:
             enabled=bool(data.get("enabled", True)),
             silent=bool(data.get("silent", False)),
             tools=list(tools) if isinstance(tools, list) else [str(tools)],
+            analyze=str(data.get("analyze") or "").strip(),
             path=path,
         )
 
@@ -441,6 +452,8 @@ class AutomationEvent(Event):
         self.description = automation.description or f"Automation: {automation.run[:60]}"
         self.silent = automation.silent
         self.required_tools = list(automation.tools)
+        self.analyze = automation.analyze
+        self.analyze_tools = list(automation.tools)
         if automation.run.startswith("/"):
             self.command = automation.run
         else:

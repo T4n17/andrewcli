@@ -24,7 +24,8 @@ run: "Give me today's date and the three most important items in todo.md."
 | `enabled` | no | Default `true`. Disabled automations can still be run manually with `/automations run`. |
 | `domain` | no | A domain name or list. The automation is only armed while one of them is active. Default: every domain. |
 | `silent` | no | Default `false`. When `true`, runs are recorded in `/status` but not printed or streamed. |
-| `tools` | no | Tool names forced into prompt runs regardless of routing (same as an event's `required_tools`). |
+| `tools` | no | Tool names forced into prompt runs regardless of routing (same as an event's `required_tools`). Also the only tools the `analyze` step may use. |
+| `analyze` | no | An instruction for the agent. The output of `run` is sent to the agent with it, and you see the agent's answer instead of the raw output. See below. |
 
 ### What `run` can do
 
@@ -36,6 +37,23 @@ run: "Give me today's date and the three most important items in todo.md."
 | `/reset`, `/rag reindex`, `/stop loop`, `/echo Stand up!` | Built-in command (`/echo` prints its text as-is, e.g. for reminders). |
 | `/summarize notes.md` | Workflow of the active domain; its streamed output is the automation's response. |
 | `/loop "Poll /health until 200" 20` | Starts an event on the bus; the event then runs on its own. |
+
+### Analyzing the output with the agent
+
+With `analyze`, the output of `run` goes to the agent instead of straight to you:
+
+```yaml
+trigger: {cron: "0 * * * *"}
+run: /monitor_atesaq
+analyze: "If the site changed, explain what changed. Otherwise say so in one line."
+```
+
+- **Workflows, built-ins, and prompts:** their output is analyzed once per run.
+- **Events** (`run: /monitor "..."`): each output the event produces is analyzed as it arrives. An event that never sends anything to the agent has no output to analyze.
+- **What you see:** the agent's answer, shown like any automation output. The raw output appears in the `/status [id]` trace as a `run` step, cut to a short preview. With `silent: true`, the answer is only recorded in `/status`.
+- **No tools by default:** the output may contain untrusted text such as web pages, so the analysis only has the tools listed under `tools`, and no skills. Listing a tool like `execute_command` lets that text influence what the agent runs.
+- **No conversation memory:** the analysis doesn't see your conversation and isn't added to it.
+- **Limits:** output past 12,000 characters is cut. Every run calls the model, even when nothing changed, so hourly automations mean hourly model calls. Errors such as an unknown command are shown as they are.
 
 ### Triggers
 
